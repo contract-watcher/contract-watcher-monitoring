@@ -33,3 +33,8 @@ build/
 .vscode/
 
 .DS_Store
+
+### Локальные секреты ###
+.env
+.env.*
+!.env.example
