@@ -27,10 +27,10 @@ class ApplicationTests {
 	void startsWithPostgresqlAndAppliesMigrations() {
 		assertThat(jdbc.queryForObject("SELECT current_schema()", String.class)).isEqualTo("monitoring");
 		assertThat(jdbc.queryForObject("SELECT version()", String.class)).startsWith("PostgreSQL");
-		assertThat(jdbc.queryForObject("""
-				SELECT count(*) FROM monitoring.flyway_schema_history
-				WHERE version = '1' AND success
-				""", Integer.class)).isEqualTo(1);
+		assertThat(jdbc.queryForList("""
+				SELECT version FROM monitoring.flyway_schema_history
+				WHERE version IS NOT NULL AND success ORDER BY installed_rank
+				""", String.class)).containsExactly("1", "2", "3");
 		assertThat(flyway.info().pending()).isEmpty();
 		flyway.validate();
 	}
