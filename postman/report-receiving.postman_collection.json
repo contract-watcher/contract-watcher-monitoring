@@ -59,6 +59,7 @@
               "pm.test(\"Подтверждение содержит ID, время UTC и duplicate=false\", () => {",
               "  const body = pm.response.json();",
               "  pm.expect(body.reportId).to.eql(pm.collectionVariables.get(\"passedReportId\"));",
+              "  pm.collectionVariables.set(\"passedReceivedAt\", body.receivedAt);",
               "  pm.expect(body.integrationId).to.eql(pm.collectionVariables.get(\"integrationId\"));",
               "  pm.expect(body.duplicate).to.eql(false);",
               "  pm.expect(body.receivedAt).to.match(/Z$/);",
@@ -140,7 +141,7 @@
       }
     },
     {
-      "name": "3. Повтор: получить 409",
+      "name": "3. Повтор: получить 200",
       "description": "Сначала выполните запрос 1. Здесь используется тот же reportId, новый ID не создается.",
       "event": [
         {
@@ -148,14 +149,15 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test(\"HTTP 409: REPORT_ID_CONFLICT\", () => {",
-              "  pm.response.to.have.status(409);",
-              "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+              "pm.test(\"HTTP 200: прежнее подтверждение, duplicate=true\", () => {",
+              "  pm.response.to.have.status(200);",
+              "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
               "  const body = pm.response.json();",
-              "  pm.expect(body.code).to.eql(\"REPORT_ID_CONFLICT\");",
-              "  pm.expect(body.status).to.eql(409);",
-              "  pm.expect(body.errors).to.be.an(\"object\");",
-              "  pm.expect(body).not.to.have.property(\"receivedAt\");",
+              "  pm.expect(body.reportId).to.eql(pm.collectionVariables.get(\"passedReportId\"));",
+              "  pm.expect(body.integrationId).to.eql(pm.collectionVariables.get(\"integrationId\"));",
+              "  pm.expect(body.duplicate).to.eql(true);",
+              "  pm.expect(body.receivedAt).to.eql(pm.collectionVariables.get(\"passedReceivedAt\"));",
+              "  pm.expect(body.receivedAt).to.match(/Z$/);",
               "});"
             ]
           }

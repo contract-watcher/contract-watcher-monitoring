@@ -20,6 +20,6 @@ final class ReportIngestionController {
 			produces = MediaType.APPLICATION_JSON_VALUE)
 	ResponseEntity<ReportAccepted> ingest(@RequestBody ReportRequest request) {
 		ReportAccepted accepted = service.ingest(request);
-		return ResponseEntity.status(HttpStatus.CREATED).body(accepted);
+		return ResponseEntity.status(accepted.duplicate() ? HttpStatus.OK : HttpStatus.CREATED).body(accepted);
 	}
 }

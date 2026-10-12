@@ -41,12 +41,6 @@ final class ReportExceptionHandler {
 				"Требуется Content-Type application/json.", Map.of());
 	}
 
-	@ExceptionHandler(ReportIdConflictException.class)
-	ResponseEntity<ProblemDetail> reportConflict() {
-		return problem(HttpStatus.CONFLICT, "REPORT_ID_CONFLICT",
-				"Отчет с таким идентификатором уже сохранен в интеграции.", Map.of());
-	}
-
 	@ExceptionHandler(Exception.class)
 	ResponseEntity<ProblemDetail> processingFailure(Exception exception) {
 		if (storageUnavailable(exception)) {
