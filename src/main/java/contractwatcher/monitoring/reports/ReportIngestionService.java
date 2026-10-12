@@ -2,6 +2,7 @@ package contractwatcher.monitoring.reports;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
@@ -16,10 +17,11 @@ final class ReportIngestionService {
 		this.validator = validator;
 		this.repository = repository;
 		this.transaction = new TransactionTemplate(transactionManager);
+		this.transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
 	}
 
 	ReportAccepted ingest(ReportRequest request) {
 		validator.validate(request);
-		return transaction.execute(status -> repository.insert(request));
+		return transaction.execute(status -> repository.save(request));
 	}
 }
