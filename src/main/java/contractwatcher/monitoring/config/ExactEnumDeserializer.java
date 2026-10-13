@@ -1,4 +1,4 @@
-package contractwatcher.monitoring.reports;
+package contractwatcher.monitoring.config;
 
 import tools.jackson.core.JsonParser;
 import tools.jackson.core.JsonToken;

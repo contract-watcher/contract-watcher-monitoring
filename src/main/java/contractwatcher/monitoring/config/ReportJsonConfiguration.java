@@ -1,4 +1,7 @@
-package contractwatcher.monitoring.reports;
+package contractwatcher.monitoring.config;
+
+import contractwatcher.monitoring.dto.ReportViolation;
+import contractwatcher.monitoring.dto.ValidationReport;
 
 import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomizer;
 import org.springframework.context.annotation.Bean;

@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -48,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ExtendWith(OutputCaptureExtension.class)
 class ReportIngestionTests {
 
-	private static final String INTEGRATION = "22222222-2222-4222-8222-222222222222";
+	private String integration;
 	private static final String CONTRACT = "33333333-3333-4333-8333-333333333333";
 	private static final String MISSING = """
 			{"fieldName":"customer_id","type":"RequiredFieldMissing","expectedType":"String","actualType":null}
@@ -63,6 +64,11 @@ class ReportIngestionTests {
 	private URI endpoint;
 	private String database;
 	private boolean databaseCreated;
+
+	@BeforeEach
+	void useSeparateIntegration() {
+		integration = UUID.randomUUID().toString();
+	}
 
 	@BeforeAll
 	void startOnOwnedDatabase() throws SQLException {
@@ -118,14 +124,14 @@ class ReportIngestionTests {
 		assertThat(response.headers().firstValue("Location")).isEmpty();
 		JsonNode body = json.readTree(response.body());
 		assertThat(body.size()).isEqualTo(4);
-		assertThat(body.path("integrationId").asString()).isEqualTo(INTEGRATION);
+		assertThat(body.path("integrationId").asString()).isEqualTo(integration);
 		assertThat(body.path("reportId").asString()).isEqualTo(id);
 		assertThat(body.path("duplicate").asBoolean()).isFalse();
 		assertThat(body.path("receivedAt").asString()).endsWith("Z");
 		var stored = report(id);
 		assertThat(stored).containsEntry("outcome", "PASSED").containsEntry("contract_version", 3)
 				.containsEntry("contract_id", UUID.fromString(CONTRACT));
-		Instant storedTime = receivedAt(INTEGRATION, id);
+		Instant storedTime = receivedAt(integration, id);
 		assertThat(Instant.parse(body.path("receivedAt").asString())).isEqualTo(storedTime);
 		assertThat(violations(id)).isEmpty();
 	}
@@ -151,8 +157,10 @@ class ReportIngestionTests {
 		assertThat(rows.get(2)).isEqualTo(repeated);
 		assertThat(rows.get(3)).containsEntry("field_name", " optional ")
 				.containsEntry("violation_kind", "NULL_NOT_ALLOWED").containsEntry("actual_type", null);
-		assertThat(rows).allSatisfy(row -> assertThat(row).containsEntry("group_id", null));
-		assertThat(jdbc.queryForObject("SELECT count(*) FROM monitoring.violation_groups", Integer.class)).isZero();
+		assertThat(rows).allSatisfy(row -> assertThat(row.get("group_id")).isInstanceOf(UUID.class));
+		assertThat(groups()).hasSize(3).extracting(row -> row.get("occurrence_count"))
+				.containsExactlyInAnyOrder(1L, 2L, 1L);
+		assertGroupsMatchOccurrences();
 	}
 
 	@Test
@@ -180,7 +188,7 @@ class ReportIngestionTests {
 		assertThat(post(valid, "application/json").statusCode()).isEqualTo(201);
 		var saved = report(id);
 		var before = counts();
-		for (String invalid : List.of("{}", valid.replace(INTEGRATION, "1-1-1-1-1"),
+		for (String invalid : List.of("{}", valid.replace(integration, "1-1-1-1-1"),
 				valid.replace(":3,", ":0,"), request(UUID.randomUUID().toString(), "Failed", ""),
 				request(UUID.randomUUID().toString(), "Passed", MISSING),
 				request(UUID.randomUUID().toString(), "Failed", "null"),
@@ -214,34 +222,19 @@ class ReportIngestionTests {
 	void confirmsDuplicateWithoutChangingReportViolationsOrCounter() throws Exception {
 		String id = UUID.randomUUID().toString();
 		String original = request(id, "Failed", MISSING + "," + MISMATCH);
-		JsonNode accepted = confirmation(post(original, "application/json"), 201, INTEGRATION, id);
-		UUID groupId = UUID.randomUUID();
-		jdbc.update("""
-				INSERT INTO monitoring.violation_groups
-				(group_id, integration_id, contract_id, contract_version, field_name, violation_kind,
-				expected_type, occurrence_count, first_seen_at, last_seen_at)
-				VALUES (?, ?, ?, 3, 'customer_id', 'REQUIRED_FIELD_MISSING', 'string', 7,
-				CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-				""", groupId, UUID.fromString(INTEGRATION), UUID.fromString(CONTRACT));
-		try {
-			jdbc.update("UPDATE monitoring.report_violations SET group_id = ? WHERE report_row_id = ? AND ordinal = 0",
-					groupId, report(id).get("report_row_id"));
-			var saved = report(id);
-			var savedViolations = violations(id);
-			var savedGroup = jdbc.queryForMap("SELECT * FROM monitoring.violation_groups WHERE group_id = ?", groupId);
-			var before = counts();
-			for (String repeated : List.of(original, request(id, "Failed", MISMATCH),
-					request(id, "Passed", "").replace(CONTRACT, UUID.randomUUID().toString()))) {
-				assertDuplicate(post(repeated, "application/json"), accepted);
-				assertThat(report(id)).isEqualTo(saved);
-				assertThat(violations(id)).isEqualTo(savedViolations);
-				assertThat(jdbc.queryForMap("SELECT * FROM monitoring.violation_groups WHERE group_id = ?", groupId))
-						.isEqualTo(savedGroup);
-				assertThat(counts()).isEqualTo(before);
-			}
-		} finally {
-			jdbc.update("UPDATE monitoring.report_violations SET group_id = NULL WHERE group_id = ?", groupId);
-			jdbc.update("DELETE FROM monitoring.violation_groups WHERE group_id = ?", groupId);
+		JsonNode accepted = confirmation(post(original, "application/json"), 201, integration, id);
+		var saved = report(id);
+		var savedViolations = violations(id);
+		var savedGroups = groups();
+		var before = counts();
+		for (String repeated : List.of(original, request(id, "Failed", MISMATCH),
+				request(id, "Failed", MISSING.replace("\"String\"", "\"Number\"")),
+				request(id, "Passed", "").replace(CONTRACT, UUID.randomUUID().toString()))) {
+			assertDuplicate(post(repeated, "application/json"), accepted);
+			assertThat(report(id)).isEqualTo(saved);
+			assertThat(violations(id)).isEqualTo(savedViolations);
+			assertThat(groups()).isEqualTo(savedGroups);
+			assertThat(counts()).isEqualTo(before);
 		}
 	}
 
@@ -250,19 +243,20 @@ class ReportIngestionTests {
 		String id = UUID.randomUUID().toString();
 		String otherIntegration = UUID.randomUUID().toString();
 		String first = request(id, "Failed", MISSING);
-		String second = request(id, "Failed", MISMATCH).replace(INTEGRATION, otherIntegration);
+		String second = request(id, "Failed", MISMATCH).replace(integration, otherIntegration);
 		var before = counts();
-		JsonNode firstAccepted = confirmation(post(first, "application/json"), 201, INTEGRATION, id);
+		JsonNode firstAccepted = confirmation(post(first, "application/json"), 201, integration, id);
 		JsonNode secondAccepted = confirmation(post(second, "application/json"), 201, otherIntegration, id);
 		assertDuplicate(post(first, "application/json"), firstAccepted);
 		assertDuplicate(post(second, "application/json"), secondAccepted);
 		assertThat(counts()).containsExactly(before.get(0) + 2, before.get(1) + 2);
-		assertThat(report(INTEGRATION, id).get("report_row_id"))
+		assertThat(report(integration, id).get("report_row_id"))
 				.isNotEqualTo(report(otherIntegration, id).get("report_row_id"));
-		assertThat(violations(INTEGRATION, id)).singleElement()
+		assertThat(violations(integration, id)).singleElement()
 				.satisfies(row -> assertThat(row).containsEntry("violation_kind", "REQUIRED_FIELD_MISSING"));
 		assertThat(violations(otherIntegration, id)).singleElement()
 				.satisfies(row -> assertThat(row).containsEntry("violation_kind", "TYPE_MISMATCH"));
+		assertGroupsMatchOccurrences();
 	}
 
 	@Test
@@ -292,7 +286,7 @@ class ReportIngestionTests {
 			}
 			assertThat(responses).extracting(HttpResponse::statusCode).containsExactlyInAnyOrder(201, 200, 200, 200);
 			JsonNode accepted = confirmation(responses.stream().filter(r -> r.statusCode() == 201).findFirst().orElseThrow(),
-					201, INTEGRATION, id);
+					201, integration, id);
 			for (var response : responses) {
 				if (response.statusCode() == 200) {
 					assertDuplicate(response, accepted);
@@ -302,6 +296,9 @@ class ReportIngestionTests {
 		assertThat(counts()).containsExactly(before.get(0) + 1, before.get(1) + 3);
 		assertThat(violations(id)).extracting(row -> row.get("violation_kind"))
 				.containsExactly("REQUIRED_FIELD_MISSING", "TYPE_MISMATCH", "TYPE_MISMATCH");
+		assertThat(groups()).hasSize(2).extracting(row -> row.get("occurrence_count"))
+				.containsExactlyInAnyOrder(1L, 2L);
+		assertGroupsMatchOccurrences();
 	}
 
 	@ParameterizedTest
@@ -324,19 +321,26 @@ class ReportIngestionTests {
 				} else {
 					held.rollback();
 				}
-				JsonNode accepted = confirmation(response.get(20, TimeUnit.SECONDS), commit ? 200 : 201, INTEGRATION, id);
+				JsonNode accepted = confirmation(response.get(20, TimeUnit.SECONDS), commit ? 200 : 201, integration, id);
 				Instant heldTime = Instant.parse("2000-01-01T00:00:00Z");
 				Instant receivedAt = Instant.parse(accepted.path("receivedAt").asString());
 				if (commit) {
 					assertThat(receivedAt).isEqualTo(heldTime);
 					assertThat(violations(id)).singleElement()
-							.satisfies(row -> assertThat(row).containsEntry("violation_kind", "TYPE_MISMATCH"));
+							.satisfies(row -> assertThat(row).containsEntry("violation_kind", "TYPE_MISMATCH")
+									.containsEntry("group_id", null));
+					assertThat(groups()).isEmpty();
 				} else {
 					assertThat(receivedAt).isAfter(heldTime);
 					assertThat(violations(id)).extracting(row -> row.get("violation_kind"))
 							.containsExactly("REQUIRED_FIELD_MISSING", "REQUIRED_FIELD_MISSING");
+					assertThat(groups()).singleElement()
+							.satisfies(row -> assertThat(row).containsEntry("occurrence_count", 2L));
+					assertGroupsMatchOccurrences();
 				}
+				var savedGroups = groups();
 				assertDuplicate(post(body, "application/json"), accepted);
+				assertThat(groups()).isEqualTo(savedGroups);
 				assertThat(counts()).containsExactly(before.get(0) + 1, before.get(1) + (commit ? 1 : 2));
 			} finally {
 				held.rollback();
@@ -347,7 +351,11 @@ class ReportIngestionTests {
 	@Test
 	void rollsBackReportAndEarlierViolationOnLateInsertFailure(CapturedOutput output) throws Exception {
 		String id = UUID.randomUUID().toString();
-		String body = request(id, "Failed", MISSING + "," + MISMATCH);
+		assertThat(post(request(UUID.randomUUID().toString(), "Failed", MISMATCH), "application/json").statusCode())
+				.isEqualTo(201);
+		String newMissing = MISSING.replace("customer_id", "a_new");
+		String body = request(id, "Failed", newMissing + "," + MISMATCH);
+		var savedGroups = groups();
 		jdbc.execute("""
 				CREATE FUNCTION monitoring.test_reject_late_violation() RETURNS trigger LANGUAGE plpgsql AS $$
 				BEGIN
@@ -365,19 +373,26 @@ class ReportIngestionTests {
 			var before = counts();
 			assertProblem(post(body, "application/json"), 500, "INTERNAL_ERROR");
 			assertThat(counts()).isEqualTo(before);
+			assertThat(groups()).isEqualTo(savedGroups);
 			assertThat(output).doesNotContain("driver-detail", "org.postgresql", "jdbc:");
 		} finally {
 			jdbc.execute("DROP FUNCTION monitoring.test_reject_late_violation() CASCADE");
 		}
-		JsonNode accepted = confirmation(post(body, "application/json"), 201, INTEGRATION, id);
+		JsonNode accepted = confirmation(post(body, "application/json"), 201, integration, id);
 		assertThat(violations(id)).hasSize(2);
 		var saved = violations(id);
+		assertGroupsMatchOccurrences();
+		var committedGroups = groups();
 		assertDuplicate(post(body, "application/json"), accepted);
 		assertThat(violations(id)).isEqualTo(saved);
+		assertThat(groups()).isEqualTo(committedGroups);
 	}
 
 	@Test
 	void returnsNoConfirmationAndRollsBackOnDeferredCommitFailure(CapturedOutput output) throws Exception {
+		assertThat(post(request(UUID.randomUUID().toString(), "Failed", MISMATCH), "application/json").statusCode())
+				.isEqualTo(201);
+		var savedGroups = groups();
 		jdbc.execute("""
 				CREATE FUNCTION monitoring.test_reject_commit() RETURNS trigger LANGUAGE plpgsql AS $$
 				BEGIN
@@ -393,6 +408,7 @@ class ReportIngestionTests {
 			assertProblem(post(request(UUID.randomUUID().toString(), "Failed", MISSING + "," + MISMATCH),
 					"application/json"), 500, "INTERNAL_ERROR");
 			assertThat(counts()).isEqualTo(before);
+			assertThat(groups()).isEqualTo(savedGroups);
 			assertThat(output).doesNotContain("driver-detail", "org.postgresql", "jdbc:");
 		} finally {
 			jdbc.execute("DROP FUNCTION monitoring.test_reject_commit() CASCADE");
@@ -423,6 +439,173 @@ class ReportIngestionTests {
 		}
 	}
 
+	@Test
+	void separatesGroupIdentityWhileKeepingExpectedTypeAsMetadata() throws Exception {
+		String first = UUID.randomUUID().toString();
+		assertThat(post(request(first, "Failed", MISSING + "," + MISMATCH), "application/json").statusCode()).isEqualTo(201);
+		var original = violations(first);
+		String second = UUID.randomUUID().toString();
+		assertThat(post(request(second, "Failed", MISSING.replace("\"String\"", "\"Number\"") + ","
+				+ MISMATCH.replace("\"expectedType\":\"Number\"", "\"expectedType\":\"Boolean\"")),
+				"application/json").statusCode()).isEqualTo(201);
+		assertThat(violations(second)).extracting(row -> row.get("group_id"))
+				.containsExactlyElementsOf(original.stream().map(row -> row.get("group_id")).toList());
+		assertThat(violations(second)).extracting(row -> row.get("expected_type")).containsExactly("number", "boolean");
+		assertThat(groups()).extracting(row -> row.get("expected_type")).containsExactlyInAnyOrder("string", "number");
+
+		String variantsId = UUID.randomUUID().toString();
+		String variants = String.join(",", MISSING.replace("customer_id", " customer_id "),
+				MISSING.replace("customer_id", "Customer_id"), MISSING.replace("RequiredFieldMissing", "NullNotAllowed"),
+				MISMATCH.replace("\"actualType\":\"String\"", "\"actualType\":\"Boolean\""));
+		assertThat(post(request(variantsId, "Failed", variants), "application/json").statusCode()).isEqualTo(201);
+		var variantGroups = violations(variantsId).stream().map(row -> row.get("group_id")).toList();
+		assertThat(variantGroups).doesNotHaveDuplicates().doesNotContain(original.get(0).get("group_id"), original.get(1).get("group_id"));
+
+		String otherIntegration = UUID.randomUUID().toString();
+		for (String changed : List.of(request(UUID.randomUUID().toString(), "Failed", MISSING + "," + MISMATCH)
+				.replace(integration, otherIntegration),
+				request(UUID.randomUUID().toString(), "Failed", MISSING + "," + MISMATCH).replace(CONTRACT, UUID.randomUUID().toString()),
+				request(UUID.randomUUID().toString(), "Failed", MISSING + "," + MISMATCH).replace(":3,", ":4,"))) {
+			JsonNode body = json.readTree(changed);
+			String scope = body.path("integrationId").asString();
+			String id = body.path("report").path("reportId").asString();
+			assertThat(post(changed, "application/json").statusCode()).isEqualTo(201);
+			assertThat(violations(scope, id)).extracting(row -> row.get("group_id"))
+					.doesNotContain(original.get(0).get("group_id"), original.get(1).get("group_id"));
+		}
+		assertThat(groups()).hasSize(10);
+		assertGroupsMatchOccurrences();
+	}
+
+	@ParameterizedTest
+	@ValueSource(booleans = {false, true})
+	void concurrentNewReportsCreateAndUpdateGroupsInOneOrder(boolean existing) throws Exception {
+		if (existing) {
+			assertThat(post(request(UUID.randomUUID().toString(), "Failed", MISSING + "," + MISMATCH),
+					"application/json").statusCode()).isEqualTo(201);
+		}
+		String earlyId = UUID.randomUUID().toString();
+		try (Connection held = jdbc.getDataSource().getConnection();
+				var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+			int blocker = backendPid(held);
+			try (var statement = held.createStatement()) {
+				statement.execute("SELECT pg_advisory_lock(" + blocker + ")");
+			}
+			held.setAutoCommit(false);
+			jdbc.execute("""
+					CREATE FUNCTION monitoring.test_delay_early_report() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN
+					  IF NEW.external_report_id = '%s'::uuid THEN
+					    PERFORM pg_advisory_xact_lock(%d);
+					  END IF;
+					  RETURN NEW;
+					END $$
+					""".formatted(earlyId, blocker));
+			try {
+				jdbc.execute("""
+						CREATE TRIGGER test_delay_early AFTER INSERT ON monitoring.reports
+						FOR EACH ROW EXECUTE FUNCTION monitoring.test_delay_early_report()
+						""");
+				var early = executor.submit(() -> post(request(earlyId, "Failed", MISSING + "," + MISMATCH), "application/json"));
+				awaitBlockedInsert(blocker);
+				try (var statement = held.prepareStatement(existing ? """
+						UPDATE monitoring.violation_groups SET occurrence_count = occurrence_count
+						WHERE integration_id = ? AND field_name = 'amount'
+						""" : """
+						INSERT INTO monitoring.violation_groups
+						(group_id, integration_id, contract_id, contract_version, field_name, violation_kind,
+						expected_type, actual_type, occurrence_count, first_seen_at, last_seen_at)
+						VALUES (?, ?, ?, 3, 'amount', 'TYPE_MISMATCH', 'number', 'string', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+						""")) {
+					if (existing) {
+						statement.setObject(1, UUID.fromString(integration));
+					} else {
+						statement.setObject(1, UUID.randomUUID());
+						statement.setObject(2, UUID.fromString(integration));
+						statement.setObject(3, UUID.fromString(CONTRACT));
+					}
+					assertThat(statement.executeUpdate()).isEqualTo(1);
+				}
+				List<String> ids = new ArrayList<>();
+				List<Future<HttpResponse<String>>> pending = new ArrayList<>();
+				for (int index = 0; index < 4; index++) {
+					String id = UUID.randomUUID().toString();
+					ids.add(id);
+					String items = index % 2 == 0 ? MISSING + "," + MISMATCH + "," + MISMATCH
+							: MISMATCH + "," + MISMATCH + "," + MISSING;
+					pending.add(executor.submit(() -> post(request(id, "Failed", items), "application/json")));
+				}
+				awaitBlockedGroupRequests(blocker, 4);
+				assertThat(early.isDone()).isFalse();
+				held.rollback();
+				for (int index = 0; index < pending.size(); index++) {
+					confirmation(pending.get(index).get(20, TimeUnit.SECONDS), 201, integration, ids.get(index));
+					assertThat(violations(ids.get(index))).extracting(row -> row.get("violation_kind"))
+							.containsExactlyElementsOf(index % 2 == 0
+									? List.of("REQUIRED_FIELD_MISSING", "TYPE_MISMATCH", "TYPE_MISMATCH")
+									: List.of("TYPE_MISMATCH", "TYPE_MISMATCH", "REQUIRED_FIELD_MISSING"));
+				}
+				try (var statement = held.createStatement()) {
+					statement.execute("SELECT pg_advisory_unlock(" + blocker + ")");
+				}
+				confirmation(early.get(20, TimeUnit.SECONDS), 201, integration, earlyId);
+				assertThat(receivedAt(integration, earlyId)).isBefore(receivedAt(integration, ids.getFirst()));
+				assertThat(groups()).hasSize(2).extracting(row -> row.get("occurrence_count"))
+						.containsExactlyInAnyOrder(existing ? 6L : 5L, existing ? 10L : 9L);
+				assertGroupsMatchOccurrences();
+			} finally {
+				held.rollback();
+				try (var statement = held.createStatement()) {
+					statement.execute("SELECT pg_advisory_unlock_all()");
+				}
+				jdbc.execute("DROP FUNCTION monitoring.test_delay_early_report() CASCADE");
+			}
+		}
+	}
+
+	private void awaitBlockedGroupRequests(int blocker, int count) throws InterruptedException {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		do {
+			Boolean blocked = jdbc.queryForObject("""
+					SELECT count(*) = ? AND bool_or(? = ANY(pg_blocking_pids(pid))) FROM pg_stat_activity
+					WHERE datname = current_database() AND wait_event_type = 'Lock'
+					AND query LIKE '%INSERT INTO monitoring.violation_groups%'
+					""", Boolean.class, count, blocker);
+			if (Boolean.TRUE.equals(blocked)) {
+				return;
+			}
+			Thread.sleep(25);
+		} while (System.nanoTime() < deadline);
+		throw new AssertionError("Новые HTTP-отчеты не дождались общей группы PostgreSQL.");
+	}
+
+	private List<Map<String, Object>> groups() {
+		return jdbc.queryForList("SELECT * FROM monitoring.violation_groups WHERE integration_id = ? ORDER BY group_id",
+				UUID.fromString(integration));
+	}
+
+	private void assertGroupsMatchOccurrences() {
+		assertThat(jdbc.queryForObject("""
+				SELECT count(*) FROM monitoring.violation_groups g
+				LEFT JOIN LATERAL (
+				  SELECT count(*) AS occurrences, min(r.received_at) AS first_seen, max(r.received_at) AS last_seen
+				  FROM monitoring.report_violations v JOIN monitoring.reports r USING (report_row_id)
+				  WHERE v.group_id = g.group_id
+				) linked ON TRUE
+				WHERE g.integration_id = ? AND (g.occurrence_count <> linked.occurrences
+				  OR g.first_seen_at IS DISTINCT FROM linked.first_seen
+				  OR g.last_seen_at IS DISTINCT FROM linked.last_seen)
+				""", Integer.class, UUID.fromString(integration))).isZero();
+		assertThat(jdbc.queryForObject("""
+				SELECT count(*) FROM monitoring.report_violations v
+				JOIN monitoring.reports r USING (report_row_id)
+				LEFT JOIN monitoring.violation_groups g USING (group_id)
+				WHERE r.integration_id = ? AND (g.group_id IS NULL
+				  OR (g.integration_id, g.contract_id, g.contract_version, g.field_name, g.violation_kind, g.actual_type)
+				  IS DISTINCT FROM (r.integration_id, r.contract_id, r.contract_version, v.field_name, v.violation_kind, v.actual_type))
+				""", Integer.class, UUID.fromString(integration))).isZero();
+	}
+
 	private Connection adminConnection() throws SQLException {
 		return DriverManager.getConnection(System.getenv("MONITORING_TEST_DATABASE_URL"),
 				System.getenv("MONITORING_TEST_DATABASE_USER"), System.getenv("MONITORING_TEST_DATABASE_PASSWORD"));
@@ -443,7 +626,7 @@ class ReportIngestionTests {
 				VALUES (?, ?, ?, 3, 'FAILED', '2000-01-01T00:00:00Z') RETURNING report_row_id
 				""")) {
 			statement.setObject(1, UUID.fromString(id));
-			statement.setObject(2, UUID.fromString(INTEGRATION));
+			statement.setObject(2, UUID.fromString(integration));
 			statement.setObject(3, UUID.fromString(CONTRACT));
 			try (var result = statement.executeQuery()) {
 				assertThat(result.next()).isTrue();
@@ -500,7 +683,7 @@ class ReportIngestionTests {
 		return """
 				{"integrationId":"%s","contractId":"%s","report":{
 				"reportId":"%s","contractVersion":3,"status":"%s","violations":[%s]}}
-				""".formatted(INTEGRATION, CONTRACT, id, status, violations);
+				""".formatted(integration, CONTRACT, id, status, violations);
 	}
 
 	private HttpResponse<String> post(String body, String contentType) throws Exception {
@@ -523,7 +706,7 @@ class ReportIngestionTests {
 	}
 
 	private Map<String, Object> report(String id) {
-		return report(INTEGRATION, id);
+		return report(integration, id);
 	}
 
 	private Instant receivedAt(String integration, String id) {
@@ -539,7 +722,7 @@ class ReportIngestionTests {
 	}
 
 	private List<Map<String, Object>> violations(String id) {
-		return violations(INTEGRATION, id);
+		return violations(integration, id);
 	}
 
 	private List<Map<String, Object>> violations(String integration, String id) {

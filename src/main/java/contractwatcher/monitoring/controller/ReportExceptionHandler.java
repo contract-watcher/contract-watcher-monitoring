@@ -1,4 +1,6 @@
-package contractwatcher.monitoring.reports;
+package contractwatcher.monitoring.controller;
+
+import contractwatcher.monitoring.exception.ReportValidationException;
 
 import java.net.URI;
 import java.sql.SQLException;
