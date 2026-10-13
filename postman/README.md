@@ -75,13 +75,13 @@ $env:MONITORING_PORT = '8080'
 
 Можно выполнить всю коллекцию через Run с одной итерацией и тем же порядком запросов.
 UUID первого и второго отчета меняются при каждом запуске, поэтому коллекцию
-можно повторять. Третий запрос специально использует UUID первого отчета.
+можно повторять. Третий запрос специально использует UUID Failed-отчета.
 
 | Запрос | Что отправляется | Ожидаемый результат |
 |---|---|---|
 | 1. Passed | Отчет с пустым violations | 201, ID отчета и интеграции, receivedAt в UTC, duplicate=false |
 | 2. Failed | Четыре нарушения, включая два одинаковых и nullable actualType | 201; все четыре элемента сохранены |
-| 3. Повтор | reportId из запроса 1 | 200, duplicate=true, прежние ID и receivedAt |
+| 3. Повтор | Failed и reportId из запроса 2 | 200, duplicate=true, прежние ID и receivedAt; группы не меняются |
 | 4. Неправильный actualType | TypeMismatch, expectedType=Number, actualType=Number | 400 VALIDATION_REPORT_INVALID, указан путь actualType |
 | 5. Поврежденный JSON | Одна открывающая фигурная скобка | 400 INVALID_REQUEST |
 | 6. Неправильный Content-Type | Корректный JSON как text/plain | 415 UNSUPPORTED_MEDIA_TYPE |
@@ -184,15 +184,31 @@ FROM monitoring.report_violations v
 JOIN monitoring.reports r USING (report_row_id)
 ORDER BY r.report_row_id, v.ordinal;
 
-SELECT count(*) FROM monitoring.violation_groups;
+SELECT group_id, integration_id, contract_id, contract_version, field_name,
+       violation_kind, expected_type, actual_type, occurrence_count,
+       first_seen_at, last_seen_at
+FROM monitoring.violation_groups
+ORDER BY field_name, violation_kind, actual_type;
 ```
 
 После одного запуска коллекции в новой БД должны быть два отчета, четыре нарушения
-и ноль групп. Два одинаковых нарушения amount имеют ordinal 1 и 2.
-У всех нарушений group_id пустой, у missing/null actual_type пустой: в psql
-так отображается SQL NULL. Ошибочные запросы и повтор не добавляют строки.
+и три группы. Два одинаковых нарушения amount имеют ordinal 1 и 2, общий group_id
+и счетчик 2. У customer_id и optional разные группы со счетчиком 1.
+У каждого нарушения заполнен group_id, у missing/null actual_type пустой: в psql
+так отображается SQL NULL. Время first_seen_at и last_seen_at каждой группы равно
+received_at Failed-отчета. Ошибочные запросы и повтор Failed не меняют строки и группы.
 Если дополнительно отправлялись ручные запросы или запускалась коллекция повторно,
 отчетов будет больше; сравнивай по reportId.
+
+Чтобы проверить следующее появление, отправь такой же Failed с новым reportId.
+Группы останутся прежними, счетчик amount станет 4, остальные 2; first_seen_at
+останется прежним, last_seen_at станет received_at нового отчета. Затем повтори
+тот же reportId: ожидается 200, все счетчики и времена должны остаться прежними.
+Смена contractVersion, contractId или integrationId с новым reportId создает
+отдельные группы. Пробелы и регистр fieldName тоже различают группы.
+expectedType не входит в ключ; группа сохраняет ожидаемый тип при создании,
+а metadata каждого нарушения хранится отдельно. Ранее сохраненные FAILED с
+group_id=NULL автоматически не пересчитываются и не меняются при duplicate.
 
 Сравни received_at с receivedAt ответа того же отчета. Они обозначают одно время:
 PostgreSQL может показать +00 вместо Z, это одинаковый часовой пояс UTC.
@@ -202,7 +218,9 @@ PostgreSQL может показать +00 вместо Z, это одинако
 Ответы 201/200 и ошибки 400/415 можно проверить обычными запросами. Отказ при поздней
 вставке, ошибка commit и потеря соединения проверяются Java-тестами на PostgreSQL:
 там используются временные triggers в собственной тестовой БД. Там же проверяются
-конкурентная доставка, ожидание незавершенной вставки и ее commit/rollback.
+конкурентная доставка, создание/обновление обеих разновидностей групп с обратным
+порядком нарушений, min/max времени при обратном порядке сохранения и rollback
+новых групп вместе с увеличениями существующих счетчиков.
 Не создавай такие triggers в БД обычного приложения.
 Проверка Monitoring через Postman не подтверждает готовность настоящего пути из Core.
 

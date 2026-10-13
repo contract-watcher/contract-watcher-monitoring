@@ -1,4 +1,9 @@
-package contractwatcher.monitoring.reports;
+package contractwatcher.monitoring.service;
+
+import contractwatcher.monitoring.dto.ReportRequest;
+import contractwatcher.monitoring.dto.ReportViolation;
+import contractwatcher.monitoring.dto.ValidationReport;
+import contractwatcher.monitoring.exception.ReportValidationException;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;

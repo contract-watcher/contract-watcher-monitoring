@@ -1,4 +1,4 @@
-package contractwatcher.monitoring.reports;
+package contractwatcher.monitoring.dto;
 
 import java.time.Instant;
 import java.util.UUID;

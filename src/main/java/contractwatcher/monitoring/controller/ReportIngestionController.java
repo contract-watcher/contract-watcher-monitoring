@@ -1,4 +1,8 @@
-package contractwatcher.monitoring.reports;
+package contractwatcher.monitoring.controller;
+
+import contractwatcher.monitoring.dto.ReportAccepted;
+import contractwatcher.monitoring.dto.ReportRequest;
+import contractwatcher.monitoring.service.ReportIngestionService;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;

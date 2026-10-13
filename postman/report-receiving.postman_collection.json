@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Monitoring: ручная проверка приема отчетов",
-    "description": "Запускайте запросы по порядку в отдельной локальной БД без рабочих данных. Новые ID создаются автоматически. Запрос 3 повторяет ID из запроса 1. Авторизация пока не реализована. Не содержит настроек подключения к БД или секретов.",
+    "description": "Запускайте запросы по порядку в отдельной локальной БД без рабочих данных. Новые ID создаются автоматически. Запрос 3 повторяет Failed из запроса 2 и не меняет группы. Авторизация пока не реализована. Не содержит настроек подключения к БД или секретов.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -111,6 +111,7 @@
               "pm.test(\"Подтверждение содержит ID, время UTC и duplicate=false\", () => {",
               "  const body = pm.response.json();",
               "  pm.expect(body.reportId).to.eql(pm.collectionVariables.get(\"failedReportId\"));",
+              "  pm.collectionVariables.set(\"failedReceivedAt\", body.receivedAt);",
               "  pm.expect(body.integrationId).to.eql(pm.collectionVariables.get(\"integrationId\"));",
               "  pm.expect(body.duplicate).to.eql(false);",
               "  pm.expect(body.receivedAt).to.match(/Z$/);",
@@ -142,7 +143,7 @@
     },
     {
       "name": "3. Повтор: получить 200",
-      "description": "Сначала выполните запрос 1. Здесь используется тот же reportId, новый ID не создается.",
+      "description": "Сначала выполните запрос 2. Здесь используется тот же reportId, новый ID не создается.",
       "event": [
         {
           "listen": "test",
@@ -153,10 +154,10 @@
               "  pm.response.to.have.status(200);",
               "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
               "  const body = pm.response.json();",
-              "  pm.expect(body.reportId).to.eql(pm.collectionVariables.get(\"passedReportId\"));",
+              "  pm.expect(body.reportId).to.eql(pm.collectionVariables.get(\"failedReportId\"));",
               "  pm.expect(body.integrationId).to.eql(pm.collectionVariables.get(\"integrationId\"));",
               "  pm.expect(body.duplicate).to.eql(true);",
-              "  pm.expect(body.receivedAt).to.eql(pm.collectionVariables.get(\"passedReceivedAt\"));",
+              "  pm.expect(body.receivedAt).to.eql(pm.collectionVariables.get(\"failedReceivedAt\"));",
               "  pm.expect(body.receivedAt).to.match(/Z$/);",
               "});"
             ]
@@ -173,7 +174,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{passedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Passed\",\n    \"violations\": []\n  }\n}",
+          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{failedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Failed\",\n    \"violations\": [\n      {\n        \"fieldName\": \"customer_id\",\n        \"type\": \"RequiredFieldMissing\",\n        \"expectedType\": \"String\",\n        \"actualType\": null\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"optional\",\n        \"type\": \"NullNotAllowed\",\n        \"expectedType\": \"Boolean\"\n      }\n    ]\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
