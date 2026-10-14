@@ -563,6 +563,184 @@ class ReportIngestionTests {
 		}
 	}
 
+	@Test
+	void historyIsIsolatedAndStableAcrossPagesWithEqualTimes() throws Exception {
+		String shared = UUID.randomUUID().toString();
+		String failed = UUID.randomUUID().toString();
+		String latest = UUID.randomUUID().toString();
+		String otherIntegration = UUID.randomUUID().toString();
+		String otherContract = UUID.randomUUID().toString();
+		assertThat(post(request(shared, "Passed", "").replace(integration, otherIntegration),
+				"application/json").statusCode()).isEqualTo(201);
+		storeHistoryFixture(shared, "Passed", "", "2026-10-12T00:00:00Z");
+		storeHistoryFixture(failed, "Failed", MISSING + "," + MISMATCH + "," + MISMATCH,
+				"2026-10-13T09:00:00.123456Z");
+		jdbc.update("UPDATE monitoring.report_violations SET group_id = NULL WHERE report_row_id = ? AND ordinal = 0",
+				report(failed).get("report_row_id"));
+		assertThat(post(request(latest, "Passed", "").replace(CONTRACT, otherContract),
+				"application/json").statusCode()).isEqualTo(201);
+		setHistoryTime(latest, "2026-10-13T09:00:00.123456Z");
+		assertThat((Long) report(latest).get("report_row_id")).isGreaterThan((Long) report(failed).get("report_row_id"));
+
+		JsonNode all = history("", 3, 0, 20);
+		assertHistoryIds(all, latest, failed, shared);
+		assertThat(history("", 3, 0, 20)).isEqualTo(all);
+		JsonNode first = history("?limit=1", 3, 0, 1);
+		JsonNode second = history("?limit=1&offset=1", 3, 1, 1);
+		assertHistoryIds(first, latest);
+		assertHistoryIds(second, failed);
+		assertHistoryIds(history("?limit=1&offset=2", 3, 2, 1), shared);
+		assertThat(first.path("items").get(0)).isEqualTo(all.path("items").get(0));
+		JsonNode item = second.path("items").get(0);
+		assertThat(item.size()).isEqualTo(6);
+		assertThat(item.path("contractId").asString()).isEqualTo(CONTRACT);
+		assertThat(item.path("contractVersion").asInt()).isEqualTo(3);
+		assertThat(item.path("status").asString()).isEqualTo("Failed");
+		assertThat(item.path("violationCount").asLong()).isEqualTo(3);
+		assertThat(item.path("receivedAt").asString()).isEqualTo("2026-10-13T09:00:00.123456Z");
+		JsonNode passed = first.path("items").get(0);
+		assertThat(passed.size()).isEqualTo(6);
+		assertThat(passed.path("contractId").asString()).isEqualTo(otherContract);
+		assertThat(passed.path("contractVersion").asInt()).isEqualTo(3);
+		assertThat(passed.path("status").asString()).isEqualTo("Passed");
+		assertThat(passed.path("violationCount").asLong()).isZero();
+	}
+
+	@Test
+	void historyAppliesPeriodAndStatusBeforePagination() throws Exception {
+		String from = UUID.randomUUID().toString();
+		String inside = UUID.randomUUID().toString();
+		String passed = UUID.randomUUID().toString();
+		String to = UUID.randomUUID().toString();
+		String later = UUID.randomUUID().toString();
+		storeHistoryFixture(from, "Failed", MISSING, "2026-10-13T00:00:00.123456Z");
+		storeHistoryFixture(inside, "Failed", MISSING, "2026-10-13T00:00:00.123457Z");
+		storeHistoryFixture(passed, "Passed", "", "2026-10-13T12:00:00Z");
+		storeHistoryFixture(to, "Failed", MISSING, "2026-10-14T00:00:00Z");
+		storeHistoryFixture(later, "Passed", "", "2026-10-15T00:00:00Z");
+		String period = "?from=2026-10-13T00:00:00.123456Z&to=2026-10-14T00:00:00Z&status=Failed";
+		assertHistoryIds(history(period + "&limit=1&offset=1", 2, 1, 1), from);
+		assertHistoryIds(history(period, 2, 0, 20), inside, from);
+		assertHistoryIds(history("?to=2026-10-14T00:00:00Z", 3, 0, 20), passed, inside, from);
+		assertHistoryIds(history("?from=2026-10-14T00:00:00Z&status=Passed", 1, 0, 20), later);
+	}
+
+	@Test
+	void historyReturnsEmptyPagesAndRejectsInvalidParametersWithoutWriting(CapturedOutput output) throws Exception {
+		assertHistoryIds(history("", 0, 0, 20));
+		String id = UUID.randomUUID().toString();
+		storeHistoryFixture(id, "Passed", "", "2026-10-13T00:00:00Z");
+		assertHistoryIds(history("?status=Failed", 0, 0, 20));
+		assertHistoryIds(history("?offset=2147483647&limit=100", 1, Integer.MAX_VALUE, 100));
+		var before = counts();
+		var beforeGroups = groups();
+		JsonNode invalidId = assertProblem(getHistory("invalid-uuid", ""), 400, "INVALID_REQUEST");
+		assertThat(invalidId.path("errors").has("integrationId")).isTrue();
+		Map<String, String> invalid = Map.ofEntries(
+				Map.entry("?from=2026-02-30T00:00:00Z", "from"),
+				Map.entry("?from=2026-10-13T00:00:00.1234567Z", "from"),
+				Map.entry("?from=2026-10-13T00:00:00Z&to=2026-10-13T00:00:00Z", "to"),
+				Map.entry("?status=private-query-marker", "status"),
+				Map.entry("?offset=-1", "offset"),
+				Map.entry("?offset=2147483648", "offset"),
+				Map.entry("?limit=101", "limit"),
+				Map.entry("?to=", "to"),
+				Map.entry("?limit=1&limit=1", "limit"));
+		for (var entry : invalid.entrySet()) {
+			JsonNode problem = assertProblem(getHistory(integration, entry.getKey()), 400, "INVALID_REQUEST");
+			assertThat(problem.path("errors").path(entry.getValue()).isArray()).isTrue();
+			assertThat(problem.path("errors").path(entry.getValue()).size()).isPositive();
+			assertThat(problem.toString()).doesNotContain("private-query-marker");
+		}
+		assertThat(output.getAll()).doesNotContain("private-query-marker");
+		assertThat(counts()).isEqualTo(before);
+		assertThat(groups()).isEqualTo(beforeGroups);
+	}
+
+	@Test
+	void historyKeepsItemsAndTotalInOneSnapshotDuringConcurrentCommit() throws Exception {
+		String previous = UUID.randomUUID().toString();
+		String committed = UUID.randomUUID().toString();
+		storeHistoryFixture(previous, "Passed", "", "1999-01-01T00:00:00Z");
+		try (Connection held = jdbc.getDataSource().getConnection();
+				var executor = Executors.newSingleThreadExecutor()) {
+			held.setAutoCommit(false);
+			try {
+				try (var statement = held.createStatement()) {
+					statement.execute("LOCK TABLE monitoring.report_violations IN ACCESS EXCLUSIVE MODE");
+				}
+				int blocker = backendPid(held);
+				Future<HttpResponse<String>> pending = executor.submit(() -> getHistory(integration, ""));
+				awaitBlockedHistory(blocker);
+				insertHeldReport(held, committed);
+				held.commit();
+				assertHistoryIds(historyPage(pending.get(10, TimeUnit.SECONDS), 1, 0, 20), previous);
+				JsonNode next = history("", 2, 0, 20);
+				assertHistoryIds(next, committed, previous);
+				assertThat(next.path("items").get(0).path("violationCount").asLong()).isEqualTo(1);
+			} finally {
+				held.rollback();
+			}
+		}
+	}
+
+	private void awaitBlockedHistory(int blocker) throws InterruptedException {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		do {
+			Boolean blocked = jdbc.queryForObject("""
+					SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+					WHERE datname = current_database() AND ? = ANY(pg_blocking_pids(pid))
+					AND wait_event_type = 'Lock' AND query LIKE '%AS violation_count%'
+					AND backend_xmin IS NOT NULL)
+					""", Boolean.class, blocker);
+			if (Boolean.TRUE.equals(blocked)) {
+				return;
+			}
+			Thread.sleep(25);
+		} while (System.nanoTime() < deadline);
+		throw new AssertionError("Страница истории не дождалась блокировки после COUNT.");
+	}
+
+	private void storeHistoryFixture(String id, String status, String violations, String time) throws Exception {
+		assertThat(post(request(id, status, violations), "application/json").statusCode()).isEqualTo(201);
+		setHistoryTime(id, time);
+	}
+
+	private void setHistoryTime(String id, String time) {
+		jdbc.update("UPDATE monitoring.reports SET received_at = ? WHERE integration_id = ? AND external_report_id = ?",
+				OffsetDateTime.parse(time), UUID.fromString(integration), UUID.fromString(id));
+	}
+
+	private HttpResponse<String> getHistory(String integrationId, String query) throws Exception {
+		URI uri = endpoint.resolve("/internal/v1/integrations/" + integrationId + "/reports" + query);
+		return http.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(15)).GET().build(),
+				HttpResponse.BodyHandlers.ofString());
+	}
+
+	private JsonNode history(String query, long total, int offset, int limit) throws Exception {
+		return historyPage(getHistory(integration, query), total, offset, limit);
+	}
+
+	private JsonNode historyPage(HttpResponse<String> response, long total, int offset, int limit) {
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/json");
+		JsonNode body = json.readTree(response.body());
+		assertThat(body.size()).isEqualTo(4);
+		assertThat(body.path("items").isArray()).isTrue();
+		assertThat(body.path("total").asLong()).isEqualTo(total);
+		assertThat(body.path("offset").asInt()).isEqualTo(offset);
+		assertThat(body.path("limit").asInt()).isEqualTo(limit);
+		return body;
+	}
+
+	private void assertHistoryIds(JsonNode page, String... expected) {
+		List<String> actual = new ArrayList<>();
+		for (JsonNode item : page.path("items")) {
+			actual.add(item.path("reportId").asString());
+		}
+		assertThat(actual).containsExactly(expected);
+	}
+
 	private void awaitBlockedGroupRequests(int blocker, int count) throws InterruptedException {
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 		do {
@@ -698,7 +876,7 @@ class ReportIngestionTests {
 		assertThat(body.path("type").asString()).isEqualTo("about:blank");
 		assertThat(body.path("status").asInt()).isEqualTo(status);
 		assertThat(body.path("code").asString()).isEqualTo(code);
-		assertThat(body.path("instance").asString()).isEqualTo("/internal/v1/reports");
+		assertThat(body.path("instance").asString()).isEqualTo(response.request().uri().getRawPath());
 		assertThat(body.path("errors").isObject()).isTrue();
 		assertThat(response.body()).doesNotContain("driver-detail", "org.postgresql", "SQLException", "jdbc:");
 		assertThat(body.has("receivedAt")).isFalse();

@@ -1,6 +1,9 @@
 package contractwatcher.monitoring.controller;
 
 import contractwatcher.monitoring.exception.ReportValidationException;
+import contractwatcher.monitoring.exception.ReportHistoryRequestException;
+
+import jakarta.servlet.http.HttpServletRequest;
 
 import java.net.URI;
 import java.sql.SQLException;
@@ -20,6 +23,7 @@ import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.transaction.TransactionSystemException;
+import org.springframework.web.servlet.HandlerMapping;
 
 @RestControllerAdvice
 final class ReportExceptionHandler {
@@ -27,30 +31,35 @@ final class ReportExceptionHandler {
 	private static final Logger LOG = LoggerFactory.getLogger(ReportExceptionHandler.class);
 
 	@ExceptionHandler(HttpMessageNotReadableException.class)
-	ResponseEntity<ProblemDetail> invalidRequest() {
-		return problem(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Некорректное тело запроса.", Map.of());
+	ResponseEntity<ProblemDetail> invalidRequest(HttpServletRequest request) {
+		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Некорректное тело запроса.", Map.of());
+	}
+
+	@ExceptionHandler(ReportHistoryRequestException.class)
+	ResponseEntity<ProblemDetail> invalidHistory(ReportHistoryRequestException exception, HttpServletRequest request) {
+		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", exception.getMessage(), exception.errors());
 	}
 
 	@ExceptionHandler(ReportValidationException.class)
-	ResponseEntity<ProblemDetail> invalidReport(ReportValidationException exception) {
-		return problem(HttpStatus.BAD_REQUEST, "VALIDATION_REPORT_INVALID",
+	ResponseEntity<ProblemDetail> invalidReport(ReportValidationException exception, HttpServletRequest request) {
+		return problem(request, HttpStatus.BAD_REQUEST, "VALIDATION_REPORT_INVALID",
 				"Отчет содержит некорректные данные.", exception.errors());
 	}
 
 	@ExceptionHandler(HttpMediaTypeNotSupportedException.class)
-	ResponseEntity<ProblemDetail> unsupportedMediaType() {
-		return problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE",
+	ResponseEntity<ProblemDetail> unsupportedMediaType(HttpServletRequest request) {
+		return problem(request, HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE",
 				"Требуется Content-Type application/json.", Map.of());
 	}
 
 	@ExceptionHandler(Exception.class)
-	ResponseEntity<ProblemDetail> processingFailure(Exception exception) {
+	ResponseEntity<ProblemDetail> processingFailure(Exception exception, HttpServletRequest request) {
 		if (storageUnavailable(exception)) {
-			return problem(HttpStatus.SERVICE_UNAVAILABLE, "STORAGE_UNAVAILABLE",
+			return problem(request, HttpStatus.SERVICE_UNAVAILABLE, "STORAGE_UNAVAILABLE",
 					"Хранилище отчетов временно недоступно.", Map.of());
 		}
-		return problem(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR",
-				"Не удалось обработать отчет.", Map.of());
+		return problem(request, HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR",
+				"GET".equals(request.getMethod()) ? "Не удалось прочитать историю." : "Не удалось обработать отчет.", Map.of());
 	}
 
 	private boolean storageUnavailable(Throwable exception) {
@@ -74,15 +83,16 @@ final class ReportExceptionHandler {
 		return false;
 	}
 
-	private ResponseEntity<ProblemDetail> problem(HttpStatus status, String code, String detail,
+	private ResponseEntity<ProblemDetail> problem(HttpServletRequest request, HttpStatus status, String code, String detail,
 			Map<String, List<String>> errors) {
 		ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
 		problem.setType(URI.create("about:blank"));
 		problem.setTitle(status.getReasonPhrase());
-		problem.setInstance(URI.create("/internal/v1/reports"));
+		problem.setInstance(URI.create(request.getRequestURI()));
 		problem.setProperty("code", code);
 		problem.setProperty("errors", errors);
-		LOG.warn("POST /internal/v1/reports: status={}, code={}", status.value(), code);
+		LOG.warn("{} {}: status={}, code={}", request.getMethod(),
+				request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE), status.value(), code);
 		return ResponseEntity.status(status).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(problem);
 	}
 }
