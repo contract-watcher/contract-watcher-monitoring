@@ -13,6 +13,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -682,6 +683,181 @@ class ReportIngestionTests {
 				held.rollback();
 			}
 		}
+	}
+
+	@Test
+	void detailsReturnSavedHeadersAndAllViolationsInOriginalOrder() throws Exception {
+		String passedId = UUID.randomUUID().toString();
+		String failedId = UUID.randomUUID().toString();
+		String nullValue = """
+				{"fieldName":" optional ","type":"NullNotAllowed","expectedType":"Boolean","actualType":null}
+				""".strip();
+		String objectMismatch = """
+				{"fieldName":"object_field","type":"TypeMismatch","expectedType":"Object","actualType":"Array"}
+				""".strip();
+		String differentMetadata = MISMATCH.replace("\"Number\"", "\"Boolean\"");
+		String input = String.join(",", MISMATCH, MISSING, nullValue, MISMATCH, objectMismatch, differentMetadata);
+		assertThat(post(request(passedId, "Passed", ""), "application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(failedId, "Failed", input), "application/json").statusCode()).isEqualTo(201);
+
+		JsonNode passed = details(integration, passedId);
+		assertThat(passed.path("status").asString()).isEqualTo("Passed");
+		assertThat(passed.path("violationCount").asLong()).isZero();
+		assertThat(passed.path("violations").isArray()).isTrue();
+		assertThat(passed.path("violations").isEmpty()).isTrue();
+		JsonNode failed = details(integration, failedId);
+		assertThat(failed.path("status").asString()).isEqualTo("Failed");
+		assertThat(failed.path("violationCount").asLong()).isEqualTo(6);
+		JsonNode expected = json.readTree("[" + input + "]");
+		var stored = violations(failedId);
+		for (int index = 0; index < expected.size(); index++) {
+			JsonNode actual = failed.path("violations").get(index);
+			assertThat(actual.size()).isEqualTo(5);
+			for (String field : List.of("fieldName", "type", "expectedType", "actualType")) {
+				assertThat(actual.get(field)).isEqualTo(expected.get(index).get(field));
+			}
+			assertThat(actual.path("groupId").asString()).isEqualTo(stored.get(index).get("group_id").toString());
+		}
+		assertThat(failed.path("violations").get(3)).isEqualTo(failed.path("violations").get(0));
+		assertThat(failed.path("violations").get(5).path("groupId"))
+				.isEqualTo(failed.path("violations").get(0).path("groupId"));
+		JsonNode page = history("", 2, 0, 20);
+		for (JsonNode item : page.path("items")) {
+			JsonNode detail = item.path("reportId").asString().equals(passedId) ? passed : failed;
+			for (String field : List.of("reportId", "contractId", "contractVersion", "status", "receivedAt", "violationCount")) {
+				assertThat(detail.get(field)).isEqualTo(item.get(field));
+			}
+		}
+	}
+
+	@Test
+	void detailsScopeSharedReportIdsAndHideUnknownOrForeignReports() throws Exception {
+		String shared = UUID.randomUUID().toString();
+		String onlyHere = UUID.randomUUID().toString();
+		String otherIntegration = UUID.randomUUID().toString();
+		String otherContract = UUID.randomUUID().toString();
+		assertThat(post(request(shared, "Passed", ""), "application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(shared, "Failed", MISSING + "," + MISMATCH)
+				.replace(integration, otherIntegration).replace(CONTRACT, otherContract)
+				.replace("\"contractVersion\":3", "\"contractVersion\":7"), "application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(onlyHere, "Failed", MISSING), "application/json").statusCode()).isEqualTo(201);
+		JsonNode here = details(integration, shared);
+		JsonNode there = details(otherIntegration, shared);
+		assertThat(here.path("status").asString()).isEqualTo("Passed");
+		assertThat(here.path("violations").size()).isZero();
+		assertThat(there.path("status").asString()).isEqualTo("Failed");
+		assertThat(there.path("contractId").asString()).isEqualTo(otherContract);
+		assertThat(there.path("contractVersion").asInt()).isEqualTo(7);
+		assertThat(there.path("violations").size()).isEqualTo(2);
+		JsonNode foreign = assertProblem(getDetails(otherIntegration, onlyHere, ""), 404, "REPORT_NOT_FOUND");
+		JsonNode unknown = assertProblem(getDetails(otherIntegration, UUID.randomUUID().toString(), ""),
+				404, "REPORT_NOT_FOUND");
+		JsonNode unknownIntegration = assertProblem(getDetails(UUID.randomUUID().toString(), onlyHere, ""),
+				404, "REPORT_NOT_FOUND");
+		assertThat(foreign.path("title").asString()).isEqualTo("Not Found");
+		assertThat(foreign.path("detail").asString()).isEqualTo("Отчет не найден в указанной интеграции.");
+		assertThat(foreign.path("errors").isEmpty()).isTrue();
+		for (String field : List.of("type", "title", "status", "detail", "code", "errors")) {
+			assertThat(unknown.get(field)).isEqualTo(foreign.get(field));
+			assertThat(unknownIntegration.get(field)).isEqualTo(foreign.get(field));
+		}
+	}
+
+	@Test
+	void detailsValidateBothIdsAndLeaveStoredDataUnchanged(CapturedOutput output) throws Exception {
+		String id = UUID.randomUUID().toString();
+		assertThat(post(request(id, "Failed", MISMATCH), "application/json").statusCode()).isEqualTo(201);
+		var beforeReports = jdbc.queryForList("SELECT * FROM monitoring.reports ORDER BY report_row_id");
+		var beforeViolations = jdbc.queryForList("SELECT * FROM monitoring.report_violations ORDER BY report_row_id, ordinal");
+		var beforeGroups = jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id");
+		for (var invalid : List.of(
+				List.of("private-integration-marker", id, "integrationId"),
+				List.of(integration, "1-1-1-1-1", "reportId"),
+				List.of(integration, "gggggggg-gggg-gggg-gggg-gggggggggggg", "reportId"),
+				List.of("private-integration-marker", "private-report-marker", "integrationId", "reportId"))) {
+			JsonNode problem = assertProblem(getDetails(invalid.get(0), invalid.get(1), "?ignored=private-query-marker"),
+					400, "INVALID_REQUEST");
+			assertThat(problem.path("errors").size()).isEqualTo(invalid.size() - 2);
+			for (String field : invalid.subList(2, invalid.size())) {
+				assertThat(problem.path("errors").path(field).isArray()).isTrue();
+				assertThat(problem.path("errors").path(field).size()).isPositive();
+			}
+			assertThat(problem.path("errors").toString()).doesNotContain(invalid.get(0), invalid.get(1));
+			assertThat(problem.path("detail").asString()).doesNotContain(invalid.get(0), invalid.get(1));
+			assertThat(problem.path("instance").asString()).doesNotContain("?", "private-query-marker");
+		}
+		JsonNode canonical = details(integration, id);
+		var uppercase = getDetails(integration.toUpperCase(Locale.ROOT), id.toUpperCase(Locale.ROOT), "");
+		assertThat(uppercase.statusCode()).isEqualTo(200);
+		assertThat(json.readTree(uppercase.body())).isEqualTo(canonical);
+		assertProblem(getDetails(integration, UUID.randomUUID().toString(), "?ignored=private-query-marker"),
+				404, "REPORT_NOT_FOUND");
+		assertThat(output.getAll()).doesNotContain("private-integration-marker", "private-report-marker",
+				"1-1-1-1-1", "gggggggg-gggg-gggg-gggg-gggggggggggg", "private-query-marker");
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.reports ORDER BY report_row_id")).isEqualTo(beforeReports);
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.report_violations ORDER BY report_row_id, ordinal"))
+				.isEqualTo(beforeViolations);
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id")).isEqualTo(beforeGroups);
+	}
+
+	@Test
+	void detailsSeeOnlyCommittedCompleteReportAndPreserveNullableMetadata() throws Exception {
+		String id = UUID.randomUUID().toString();
+		try (Connection held = jdbc.getDataSource().getConnection()) {
+			held.setAutoCommit(false);
+			try {
+				insertHeldReport(held, id);
+				assertProblem(getDetails(integration, id, ""), 404, "REPORT_NOT_FOUND");
+				try (var statement = held.prepareStatement("""
+						INSERT INTO monitoring.report_violations
+						(report_row_id, ordinal, field_name, violation_kind, expected_type, actual_type)
+						SELECT report_row_id, 1, 'nullable_field', 'NULL_NOT_ALLOWED', NULL, NULL
+						FROM monitoring.reports WHERE integration_id = ? AND external_report_id = ?
+						""")) {
+					statement.setObject(1, UUID.fromString(integration));
+					statement.setObject(2, UUID.fromString(id));
+					assertThat(statement.executeUpdate()).isEqualTo(1);
+				}
+				held.commit();
+				JsonNode complete = details(integration, id);
+				assertThat(complete.path("status").asString()).isEqualTo("Failed");
+				assertThat(complete.path("receivedAt").asString()).isEqualTo("2000-01-01T00:00:00Z");
+				assertThat(complete.path("violationCount").asLong()).isEqualTo(2);
+				assertThat(complete.path("violations")).isEqualTo(json.readTree("""
+						[
+						  {"groupId":null,"fieldName":"amount","type":"TypeMismatch","expectedType":"Number","actualType":"String"},
+						  {"groupId":null,"fieldName":"nullable_field","type":"NullNotAllowed","expectedType":null,"actualType":null}
+						]
+						"""));
+			} finally {
+				held.rollback();
+			}
+		}
+	}
+
+	private HttpResponse<String> getDetails(String integrationId, String reportId, String query) throws Exception {
+		URI uri = endpoint.resolve("/internal/v1/integrations/" + integrationId + "/reports/" + reportId + query);
+		return http.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(15)).GET().build(),
+				HttpResponse.BodyHandlers.ofString());
+	}
+
+	private JsonNode details(String integrationId, String reportId) throws Exception {
+		var response = getDetails(integrationId, reportId, "");
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/json");
+		JsonNode body = json.readTree(response.body());
+		var stored = report(integrationId, reportId);
+		assertThat(body.size()).isEqualTo(8);
+		assertThat(body.path("integrationId").asString()).isEqualTo(integrationId);
+		assertThat(body.path("reportId").asString()).isEqualTo(reportId);
+		assertThat(body.path("contractId").asString()).isEqualTo(stored.get("contract_id").toString());
+		assertThat(body.path("contractVersion").asInt()).isEqualTo(stored.get("contract_version"));
+		assertThat(body.path("receivedAt").asString()).endsWith("Z");
+		assertThat(Instant.parse(body.path("receivedAt").asString())).isEqualTo(receivedAt(integrationId, reportId));
+		assertThat(body.path("violations").isArray()).isTrue();
+		assertThat(body.path("violationCount").asLong()).isEqualTo((long) violations(integrationId, reportId).size());
+		assertThat(body.path("violations").size()).isEqualTo(body.path("violationCount").asLong());
+		return body;
 	}
 
 	private void awaitBlockedHistory(int blocker) throws InterruptedException {

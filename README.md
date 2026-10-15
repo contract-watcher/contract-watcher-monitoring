@@ -71,6 +71,8 @@ HTTP-тесты приема проверяют строгий JSON и metadata,
 при поздней вставке и commit, потерю соединения,
 а также совпадение времени подтверждения с БД. Тестовые triggers создаются только
 в собственной временной БД; HTTP-запросы выполняют настоящий commit приложения.
+Проверки подробностей используют тот же стенд: полный ответ и порядок нарушений,
+изоляция пары ID, ошибки UUID и отсутствие записи до commit.
 Проверки маппинга и валидации работают без БД. Если тестовые переменные не заданы,
 тесты PostgreSQL пропускаются. Успешная сборка с такими
 пропусками не подтверждает работу хранения на PostgreSQL.
@@ -172,3 +174,115 @@ Core проверяет существование интеграции и до�
 Core передает фильтры в Monitoring и разбирает эту оболочку. Техническую ошибку
 нельзя выдавать Frontend как пустую историю. Подключение Core/Frontend и проверка
 полного маршрута выполняются отдельно; это описание подготовлено для передачи.
+
+## Подробности отчета: контракт для Core
+
+`GET /internal/v1/integrations/{integrationId}/reports/{reportId}` возвращает
+HTTP 200, `application/json`. Оба параметра имеют стандартную запись UUID
+8-4-4-4-12 hex, регистр hex допускается любой. Core проверяет доступ к интеграции
+и передает оба ID. Monitoring ищет строго эту пару в своей схеме, без обращения к Core.
+
+Ответ плоский: `integrationId`, `reportId`, `contractId`, `contractVersion`,
+`status`, `receivedAt`, `violationCount`, `violations`. Заголовок совпадает с историей:
+UUID и версия сохраненного контракта, `Passed`/`Failed`, время приема в UTC с `Z`,
+64-битное число нарушений. Внутренний ID строки в ответ не входит.
+
+Каждое нарушение содержит `groupId`, `fieldName`, `type`, `expectedType`, `actualType`.
+`groupId` берется из сохраненного нарушения, а имя поля возвращается точно, включая пробелы.
+`type`: `RequiredFieldMissing`, `NullNotAllowed`, `TypeMismatch`.
+Типы: `String`, `Number`, `Boolean`, `Object`, `Array`, как в Common.
+Nullable `groupId`, `expectedType`, `actualType` присутствуют явно со значением `null`.
+Ожидаемый тип читается из нарушения, а не из снимка группы.
+
+`violations` содержит все сохраненные элементы по `ordinal ASC`, включая одинаковые.
+Для Passed возвращается `[]` и `violationCount=0`. Счетчик равен размеру списка.
+GET не запускает повторную валидацию, не нормализует metadata и не меняет группы.
+Заголовок и список читает один параметризованный LEFT JOIN, используя существующие
+ключи `(integration_id, external_report_id)` и `(report_row_id, ordinal)`.
+Один SELECT PostgreSQL читает общий снимок обеих таблиц в READ COMMITTED;
+отдельная REPEATABLE READ транзакция истории здесь не нужна.
+До commit приема GET может вернуть 404; после commit возвращается полный отчет.
+Ожидание незавершенного приема и повтор запроса внутри GET не добавляются.
+
+Примеры содержат вымышленные ID и имена полей, без значений webhook.
+Failed с двумя одинаковыми нарушениями одной группы:
+
+```json
+{
+  "integrationId": "22222222-2222-4222-8222-222222222222",
+  "reportId": "66666666-6666-4666-8666-666666666666",
+  "contractId": "33333333-3333-4333-8333-333333333333",
+  "contractVersion": 3,
+  "status": "Failed",
+  "receivedAt": "2026-10-13T09:00:00.123456Z",
+  "violationCount": 3,
+  "violations": [
+    {
+      "groupId": "77777777-7777-4777-8777-777777777777",
+      "fieldName": "field_b",
+      "type": "TypeMismatch",
+      "expectedType": "Number",
+      "actualType": "String"
+    },
+    {
+      "groupId": "88888888-8888-4888-8888-888888888888",
+      "fieldName": "field_a",
+      "type": "RequiredFieldMissing",
+      "expectedType": "String",
+      "actualType": null
+    },
+    {
+      "groupId": "77777777-7777-4777-8777-777777777777",
+      "fieldName": "field_b",
+      "type": "TypeMismatch",
+      "expectedType": "Number",
+      "actualType": "String"
+    }
+  ]
+}
+```
+
+Passed:
+
+```json
+{
+  "integrationId": "22222222-2222-4222-8222-222222222222",
+  "reportId": "99999999-9999-4999-8999-999999999999",
+  "contractId": "33333333-3333-4333-8333-333333333333",
+  "contractVersion": 3,
+  "status": "Passed",
+  "receivedAt": "2026-10-13T09:01:00Z",
+  "violationCount": 0,
+  "violations": []
+}
+```
+
+Ошибки используют тот же Problem Details, что прием и история:
+
+- 400 `INVALID_REQUEST`: неверный UUID; `errors.integrationId` и/или `errors.reportId`
+  содержат массивы сообщений. Обе ошибки собираются до запроса к БД,
+  отклоненные значения не включаются в `detail`/`errors` и логи.
+- 404 `REPORT_NOT_FOUND`: неизвестная пара, в том числе отчет чужой интеграции.
+  Оба случая одинаковы; `errors={}`. Monitoring не проверяет существование интеграции.
+- 503 `STORAGE_UNAVAILABLE`: хранилище временно недоступно, `errors={}`.
+- 500 `INTERNAL_ERROR`: прочая ошибка чтения, `errors={}`.
+
+404, `application/problem+json`:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Отчет не найден в указанной интеграции.",
+  "instance": "/internal/v1/integrations/22222222-2222-4222-8222-222222222222/reports/66666666-6666-4666-8666-666666666666",
+  "code": "REPORT_NOT_FOUND",
+  "errors": {}
+}
+```
+
+`instance` содержит фактический путь без query, в логах используется шаблон маршрута.
+Core должен разбирать плоский DTO, UUID/null группы и объект `errors`, сохранять
+порядок и повторы и передавать результат Frontend. Техническая ошибка не означает
+пустой отчет. Групповой API реализуется отдельно. Локальные HTTP/PostgreSQL-проверки
+этого GET не подтверждают реальный маршрут Core -> Monitoring -> Frontend.

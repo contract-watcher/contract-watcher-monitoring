@@ -2,6 +2,8 @@ package contractwatcher.monitoring.controller;
 
 import contractwatcher.monitoring.exception.ReportValidationException;
 import contractwatcher.monitoring.exception.ReportHistoryRequestException;
+import contractwatcher.monitoring.exception.ReportDetailsRequestException;
+import contractwatcher.monitoring.exception.ReportNotFoundException;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -46,6 +48,16 @@ final class ReportExceptionHandler {
 				"Отчет содержит некорректные данные.", exception.errors());
 	}
 
+	@ExceptionHandler(ReportDetailsRequestException.class)
+	ResponseEntity<ProblemDetail> invalidDetails(ReportDetailsRequestException exception, HttpServletRequest request) {
+		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", exception.getMessage(), exception.errors());
+	}
+
+	@ExceptionHandler(ReportNotFoundException.class)
+	ResponseEntity<ProblemDetail> reportNotFound(ReportNotFoundException exception, HttpServletRequest request) {
+		return problem(request, HttpStatus.NOT_FOUND, "REPORT_NOT_FOUND", exception.getMessage(), Map.of());
+	}
+
 	@ExceptionHandler(HttpMediaTypeNotSupportedException.class)
 	ResponseEntity<ProblemDetail> unsupportedMediaType(HttpServletRequest request) {
 		return problem(request, HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE",
@@ -59,7 +71,15 @@ final class ReportExceptionHandler {
 					"Хранилище отчетов временно недоступно.", Map.of());
 		}
 		return problem(request, HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR",
-				"GET".equals(request.getMethod()) ? "Не удалось прочитать историю." : "Не удалось обработать отчет.", Map.of());
+				failureDetail(request), Map.of());
+	}
+
+	private String failureDetail(HttpServletRequest request) {
+		if ("GET".equals(request.getMethod())) {
+			return ReportDetailsController.PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))
+					? "Не удалось прочитать отчет." : "Не удалось прочитать историю.";
+		}
+		return "Не удалось обработать отчет.";
 	}
 
 	private boolean storageUnavailable(Throwable exception) {
