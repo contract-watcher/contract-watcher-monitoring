@@ -13,6 +13,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import contractwatcher.monitoring.model.ReportToStore;
+import contractwatcher.monitoring.model.ReportDetailsEntry;
 import contractwatcher.monitoring.model.ReportHistoryEntry;
 import contractwatcher.monitoring.model.ReportHistoryQuery;
 import contractwatcher.monitoring.model.StoredReport;
@@ -53,6 +54,42 @@ public class ReportRepository {
 		var filter = historyFilter(query);
 		return jdbc.queryForObject("SELECT count(*) FROM monitoring.reports r WHERE " + filter.sql(),
 				Long.class, filter.values().toArray());
+	}
+
+	public Optional<ReportDetailsEntry> findDetails(UUID integrationId, UUID reportId) {
+		// Один оператор читает заголовок и нарушения в общем снимке PostgreSQL.
+		return jdbc.query("""
+				SELECT r.integration_id, r.external_report_id, r.contract_id,
+				       r.contract_version, r.outcome, r.received_at,
+				       v.ordinal, v.field_name, v.violation_kind,
+				       v.expected_type, v.actual_type, v.group_id
+				FROM monitoring.reports r
+				LEFT JOIN monitoring.report_violations v ON v.report_row_id = r.report_row_id
+				WHERE r.integration_id = ? AND r.external_report_id = ?
+				ORDER BY v.ordinal ASC
+				""", ReportRepository::detailsEntry, integrationId, reportId);
+	}
+
+	private static Optional<ReportDetailsEntry> detailsEntry(ResultSet rows) throws SQLException {
+		if (!rows.next()) {
+			return Optional.empty();
+		}
+		UUID integrationId = rows.getObject("integration_id", UUID.class);
+		UUID reportId = rows.getObject("external_report_id", UUID.class);
+		UUID contractId = rows.getObject("contract_id", UUID.class);
+		int contractVersion = rows.getInt("contract_version");
+		String outcome = rows.getString("outcome");
+		var receivedAt = rows.getObject("received_at", OffsetDateTime.class).toInstant();
+		var violations = new ArrayList<ReportDetailsEntry.Violation>();
+		do {
+			if (rows.getObject("ordinal", Integer.class) != null) {
+				violations.add(new ReportDetailsEntry.Violation(rows.getObject("group_id", UUID.class),
+						rows.getString("field_name"), rows.getString("violation_kind"),
+						rows.getString("expected_type"), rows.getString("actual_type")));
+			}
+		} while (rows.next());
+		return Optional.of(new ReportDetailsEntry(integrationId, reportId, contractId, contractVersion,
+				outcome, receivedAt, List.copyOf(violations)));
 	}
 
 	public List<ReportHistoryEntry> findHistory(ReportHistoryQuery query) {
