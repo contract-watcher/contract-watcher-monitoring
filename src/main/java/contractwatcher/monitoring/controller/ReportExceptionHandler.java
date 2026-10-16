@@ -4,6 +4,7 @@ import contractwatcher.monitoring.exception.ReportValidationException;
 import contractwatcher.monitoring.exception.ReportHistoryRequestException;
 import contractwatcher.monitoring.exception.ReportDetailsRequestException;
 import contractwatcher.monitoring.exception.ReportNotFoundException;
+import contractwatcher.monitoring.exception.ViolationGroupsRequestException;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -48,6 +49,11 @@ final class ReportExceptionHandler {
 				"Отчет содержит некорректные данные.", exception.errors());
 	}
 
+	@ExceptionHandler(ViolationGroupsRequestException.class)
+	ResponseEntity<ProblemDetail> invalidGroups(ViolationGroupsRequestException exception, HttpServletRequest request) {
+		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", exception.getMessage(), exception.errors());
+	}
+
 	@ExceptionHandler(ReportDetailsRequestException.class)
 	ResponseEntity<ProblemDetail> invalidDetails(ReportDetailsRequestException exception, HttpServletRequest request) {
 		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", exception.getMessage(), exception.errors());
@@ -76,6 +82,9 @@ final class ReportExceptionHandler {
 
 	private String failureDetail(HttpServletRequest request) {
 		if ("GET".equals(request.getMethod())) {
+			if (ViolationGroupsController.PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))) {
+				return "Не удалось прочитать группы нарушений.";
+			}
 			return ReportDetailsController.PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))
 					? "Не удалось прочитать отчет." : "Не удалось прочитать историю.";
 		}
