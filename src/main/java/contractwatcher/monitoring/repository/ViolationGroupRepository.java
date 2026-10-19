@@ -7,6 +7,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -24,6 +25,20 @@ public class ViolationGroupRepository {
 
 	ViolationGroupRepository(JdbcTemplate jdbc) {
 		this.jdbc = jdbc;
+	}
+
+	public Optional<ViolationGroupsResult.Item> findDetails(UUID integrationId, UUID groupId) {
+		var items = jdbc.query("""
+				SELECT group_id, contract_id, contract_version,
+				       field_name, violation_kind, expected_type, actual_type,
+				       occurrence_count, first_seen_at, last_seen_at
+				FROM monitoring.violation_groups
+				WHERE integration_id = ? AND group_id = ?
+				""", (row, index) -> groupItem(row), integrationId, groupId);
+		if (items.size() > 1) {
+			throw new IllegalStateException("Неожиданное число групп нарушений.");
+		}
+		return items.stream().findFirst();
 	}
 
 	public ViolationGroupsResult findGroups(ViolationGroupsQuery query) {
@@ -56,14 +71,19 @@ public class ViolationGroupRepository {
 		do {
 			UUID groupId = rows.getObject("group_id", UUID.class);
 			if (groupId != null) {
-				items.add(new ViolationGroupsResult.Item(groupId, rows.getObject("contract_id", UUID.class),
-						rows.getInt("contract_version"), rows.getString("field_name"), rows.getString("violation_kind"),
-						rows.getString("expected_type"), rows.getString("actual_type"), rows.getLong("occurrence_count"),
-						rows.getObject("first_seen_at", OffsetDateTime.class).toInstant(),
-						rows.getObject("last_seen_at", OffsetDateTime.class).toInstant()));
+				items.add(groupItem(rows));
 			}
 		} while (rows.next());
 		return new ViolationGroupsResult(List.copyOf(items), total);
+	}
+
+	private static ViolationGroupsResult.Item groupItem(ResultSet row) throws SQLException {
+		return new ViolationGroupsResult.Item(row.getObject("group_id", UUID.class),
+				row.getObject("contract_id", UUID.class), row.getInt("contract_version"),
+				row.getString("field_name"), row.getString("violation_kind"),
+				row.getString("expected_type"), row.getString("actual_type"), row.getLong("occurrence_count"),
+				row.getObject("first_seen_at", OffsetDateTime.class).toInstant(),
+				row.getObject("last_seen_at", OffsetDateTime.class).toInstant());
 	}
 
 	public UUID recordOccurrence(ReportToStore report, Violation violation, Instant receivedAt) {
