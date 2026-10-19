@@ -5,6 +5,8 @@ import contractwatcher.monitoring.exception.ReportHistoryRequestException;
 import contractwatcher.monitoring.exception.ReportDetailsRequestException;
 import contractwatcher.monitoring.exception.ReportNotFoundException;
 import contractwatcher.monitoring.exception.ViolationGroupsRequestException;
+import contractwatcher.monitoring.exception.ViolationGroupDetailsRequestException;
+import contractwatcher.monitoring.exception.ViolationGroupNotFoundException;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -59,6 +61,17 @@ final class ReportExceptionHandler {
 		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", exception.getMessage(), exception.errors());
 	}
 
+	@ExceptionHandler(ViolationGroupDetailsRequestException.class)
+	ResponseEntity<ProblemDetail> invalidGroupDetails(ViolationGroupDetailsRequestException exception,
+			HttpServletRequest request) {
+		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", exception.getMessage(), exception.errors());
+	}
+
+	@ExceptionHandler(ViolationGroupNotFoundException.class)
+	ResponseEntity<ProblemDetail> groupNotFound(ViolationGroupNotFoundException exception, HttpServletRequest request) {
+		return problem(request, HttpStatus.NOT_FOUND, "VIOLATION_GROUP_NOT_FOUND", exception.getMessage(), Map.of());
+	}
+
 	@ExceptionHandler(ReportNotFoundException.class)
 	ResponseEntity<ProblemDetail> reportNotFound(ReportNotFoundException exception, HttpServletRequest request) {
 		return problem(request, HttpStatus.NOT_FOUND, "REPORT_NOT_FOUND", exception.getMessage(), Map.of());
@@ -82,6 +95,9 @@ final class ReportExceptionHandler {
 
 	private String failureDetail(HttpServletRequest request) {
 		if ("GET".equals(request.getMethod())) {
+			if (ViolationGroupsController.DETAILS_PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))) {
+				return "Не удалось прочитать группу нарушений.";
+			}
 			if (ViolationGroupsController.PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))) {
 				return "Не удалось прочитать группы нарушений.";
 			}

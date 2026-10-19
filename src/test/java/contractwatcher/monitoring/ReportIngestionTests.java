@@ -985,6 +985,178 @@ class ReportIngestionTests {
 	}
 
 	@Test
+	void groupDetailsMatchListAndReportLinksWhileKeepingCreationMetadata() throws Exception {
+		String firstId = UUID.randomUUID().toString();
+		String secondId = UUID.randomUUID().toString();
+		String mismatch = MISMATCH.replace("amount", " amount ");
+		String first = request(firstId, "Failed", mismatch + "," + mismatch);
+		assertThat(post(first, "application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(secondId, "Failed", mismatch), "application/json").statusCode()).isEqualTo(201);
+		UUID id = (UUID) violations(firstId).getFirst().get("group_id");
+		JsonNode initial = groupDetails(id);
+		assertThat(initial).isEqualTo(groupItem(groupPage("", 1, 0, 20), id));
+		assertThat(initial.path("contractId").asString()).isEqualTo(CONTRACT);
+		assertThat(initial.path("contractVersion").asInt()).isEqualTo(3);
+		assertThat(initial.path("fieldName").asString()).isEqualTo(" amount ");
+		assertThat(initial.path("type").asString()).isEqualTo("TypeMismatch");
+		assertThat(initial.path("expectedType").asString()).isEqualTo("Number");
+		assertThat(initial.path("actualType").asString()).isEqualTo("String");
+		assertThat(initial.path("occurrenceCount").asLong()).isEqualTo(3);
+		assertThat(Instant.parse(initial.path("firstSeenAt").asString())).isEqualTo(receivedAt(integration, firstId));
+		assertThat(Instant.parse(initial.path("lastSeenAt").asString())).isEqualTo(receivedAt(integration, secondId));
+		for (String reportId : List.of(firstId, secondId)) {
+			for (JsonNode violation : details(integration, reportId).path("violations")) {
+				assertThat(violation.path("groupId").asString()).isEqualTo(id.toString());
+			}
+		}
+
+		String otherContract = UUID.randomUUID().toString();
+		String otherId = UUID.randomUUID().toString();
+		String nextId = UUID.randomUUID().toString();
+		assertThat(post(request(otherId, "Failed", mismatch).replace(CONTRACT, otherContract),
+				"application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(nextId, "Failed", mismatch).replace("\"contractVersion\":3", "\"contractVersion\":4"),
+				"application/json").statusCode()).isEqualTo(201);
+		UUID otherGroup = (UUID) violations(otherId).getFirst().get("group_id");
+		UUID nextGroup = (UUID) violations(nextId).getFirst().get("group_id");
+		assertThat(List.of(id, otherGroup, nextGroup)).doesNotHaveDuplicates();
+		assertThat(groupDetails(otherGroup).path("contractId").asString()).isEqualTo(otherContract);
+		assertThat(groupDetails(otherGroup).path("contractVersion").asInt()).isEqualTo(3);
+		assertThat(groupDetails(nextGroup).path("contractId").asString()).isEqualTo(CONTRACT);
+		assertThat(groupDetails(nextGroup).path("contractVersion").asInt()).isEqualTo(4);
+
+		String changedId = UUID.randomUUID().toString();
+		assertThat(post(request(changedId, "Failed", mismatch.replace("\"Number\"", "\"Boolean\"")),
+				"application/json").statusCode()).isEqualTo(201);
+		JsonNode changed = details(integration, changedId).path("violations").get(0);
+		assertThat(changed.path("groupId").asString()).isEqualTo(id.toString());
+		assertThat(changed.path("expectedType").asString()).isEqualTo("Boolean");
+		JsonNode current = groupDetails(id);
+		assertThat(current.path("expectedType").asString()).isEqualTo("Number");
+		assertThat(current.path("occurrenceCount").asLong()).isEqualTo(4);
+		JsonNode page = groupPage("", 3, 0, 20);
+		for (var stored : groups()) {
+			UUID groupId = (UUID) stored.get("group_id");
+			JsonNode detail = groupDetails(groupId);
+			assertThat(detail).isEqualTo(groupItem(page, groupId));
+			assertThat(detail.path("occurrenceCount").asLong()).isEqualTo(stored.get("occurrence_count"));
+			for (String field : List.of("firstSeenAt", "lastSeenAt")) {
+				String column = field.equals("firstSeenAt") ? "first_seen_at" : "last_seen_at";
+				assertThat(Instant.parse(detail.path(field).asString()))
+						.isEqualTo(((java.sql.Timestamp) stored.get(column)).toInstant());
+			}
+		}
+		assertGroupsMatchOccurrences();
+		assertThat(post(first, "application/json").statusCode()).isEqualTo(200);
+		assertThat(groupDetails(id)).isEqualTo(current);
+		assertThat(groupPage("", 3, 0, 20)).isEqualTo(page);
+		assertGroupsMatchOccurrences();
+	}
+
+	@Test
+	void groupDetailsHideForeignGroupsAndValidateBothIdsWithoutWriting(CapturedOutput output) throws Exception {
+		String reportId = UUID.randomUUID().toString();
+		assertThat(post(request(reportId, "Failed", MISMATCH), "application/json").statusCode()).isEqualTo(201);
+		UUID id = (UUID) violations(reportId).getFirst().get("group_id");
+		String otherIntegration = UUID.randomUUID().toString();
+		assertThat(post(request(UUID.randomUUID().toString(), "Passed", "").replace(integration, otherIntegration),
+				"application/json").statusCode()).isEqualTo(201);
+		var beforeReports = jdbc.queryForList("SELECT * FROM monitoring.reports ORDER BY report_row_id");
+		var beforeViolations = jdbc.queryForList("SELECT * FROM monitoring.report_violations ORDER BY report_row_id, ordinal");
+		var beforeGroups = jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id");
+		JsonNode canonical = groupDetails(id);
+		var uppercase = getGroupDetails(integration.toUpperCase(Locale.ROOT), id.toString().toUpperCase(Locale.ROOT),
+				"?offset=invalid&ignored=private-query-marker");
+		assertThat(uppercase.statusCode()).isEqualTo(200);
+		assertThat(json.readTree(uppercase.body())).isEqualTo(canonical);
+		JsonNode foreign = assertProblem(getGroupDetails(otherIntegration, id.toString(), ""),
+				404, "VIOLATION_GROUP_NOT_FOUND");
+		JsonNode unknown = assertProblem(getGroupDetails(integration, "00000000-0000-0000-0000-000000000000", ""),
+				404, "VIOLATION_GROUP_NOT_FOUND");
+		JsonNode unknownIntegration = assertProblem(getGroupDetails(UUID.randomUUID().toString(), id.toString(),
+				"?ignored=private-query-marker"), 404, "VIOLATION_GROUP_NOT_FOUND");
+		assertThat(foreign.path("title").asString()).isEqualTo("Not Found");
+		assertThat(foreign.path("detail").asString()).isEqualTo("Группа нарушений не найдена в указанной интеграции.");
+		assertThat(foreign.path("errors").isEmpty()).isTrue();
+		for (String field : List.of("type", "title", "status", "detail", "code", "errors")) {
+			assertThat(unknown.get(field)).isEqualTo(foreign.get(field));
+			assertThat(unknownIntegration.get(field)).isEqualTo(foreign.get(field));
+		}
+		for (var invalid : List.of(
+				List.of("private-integration-marker", id.toString(), "integrationId"),
+				List.of(integration, "1-1-1-1-1", "groupId"),
+				List.of(integration, "gggggggg-gggg-gggg-gggg-gggggggggggg", "groupId"),
+				List.of("private-integration-marker", "private-group-marker", "integrationId", "groupId"))) {
+			JsonNode problem = assertProblem(getGroupDetails(invalid.get(0), invalid.get(1), "?ignored=private-query-marker"),
+					400, "INVALID_REQUEST");
+			assertThat(problem.path("detail").asString()).isEqualTo("Некорректные идентификаторы группы нарушений.");
+			assertThat(problem.path("errors").size()).isEqualTo(invalid.size() - 2);
+			for (String field : invalid.subList(2, invalid.size())) {
+				assertThat(problem.path("errors").get(field))
+						.isEqualTo(json.readTree("[\"Требуется UUID в стандартной строковой записи.\"]"));
+			}
+			assertThat(problem.path("detail").asString()).doesNotContain(invalid.get(0), invalid.get(1));
+			assertThat(problem.path("errors").toString()).doesNotContain(invalid.get(0), invalid.get(1));
+		}
+		assertThat(output.getAll()).contains(
+				"GET /internal/v1/integrations/{integrationId}/violation-groups/{groupId}: status=400, code=INVALID_REQUEST",
+				"status=404, code=VIOLATION_GROUP_NOT_FOUND")
+				.doesNotContain("private-integration-marker", "private-group-marker", "private-query-marker",
+						"1-1-1-1-1", "gggggggg-gggg-gggg-gggg-gggggggggggg");
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.reports ORDER BY report_row_id")).isEqualTo(beforeReports);
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.report_violations ORDER BY report_row_id, ordinal"))
+				.isEqualTo(beforeViolations);
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id")).isEqualTo(beforeGroups);
+	}
+
+	@Test
+	void groupDetailsPreserveNullMetadataAndExactInt64WithoutRecounting() throws Exception {
+		UUID missing = UUID.randomUUID();
+		UUID nullValue = UUID.randomUUID();
+		try (Connection connection = jdbc.getDataSource().getConnection()) {
+			insertGroup(connection, missing, "nullable_field", "2000-01-01T03:00:00.123456+03:00");
+			insertGroup(connection, nullValue, "null_field", "2000-01-01T00:00:00Z");
+		}
+		jdbc.update("UPDATE monitoring.violation_groups SET occurrence_count = ? WHERE group_id = ?",
+				9007199254740993L, missing);
+		jdbc.update("UPDATE monitoring.violation_groups SET violation_kind = 'NULL_NOT_ALLOWED' WHERE group_id = ?", nullValue);
+		var beforeReports = jdbc.queryForList("SELECT * FROM monitoring.reports ORDER BY report_row_id");
+		var beforeViolations = jdbc.queryForList("SELECT * FROM monitoring.report_violations ORDER BY report_row_id, ordinal");
+		var beforeGroups = jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id");
+		JsonNode nullable = groupDetails(missing);
+		assertThat(nullable.path("type").asString()).isEqualTo("RequiredFieldMissing");
+		assertThat(nullable.path("occurrenceCount").isIntegralNumber()).isTrue();
+		assertThat(nullable.path("occurrenceCount").asLong()).isEqualTo(9007199254740993L);
+		assertThat(nullable.path("occurrenceCount").toString()).isEqualTo("9007199254740993");
+		assertThat(nullable.path("firstSeenAt").asString()).isEqualTo("2000-01-01T00:00:00.123456Z");
+		assertThat(nullable.get("firstSeenAt")).isEqualTo(nullable.get("lastSeenAt"));
+		JsonNode nullDetail = groupDetails(nullValue);
+		assertThat(nullDetail.path("type").asString()).isEqualTo("NullNotAllowed");
+		assertThat(nullDetail.path("occurrenceCount").asLong()).isEqualTo(1);
+		JsonNode page = groupPage("", 2, 0, 20);
+		for (UUID id : List.of(missing, nullValue)) {
+			JsonNode detail = groupDetails(id);
+			assertThat(detail.get("expectedType").isNull()).isTrue();
+			assertThat(detail.get("actualType").isNull()).isTrue();
+			assertThat(detail).isEqualTo(groupItem(page, id));
+		}
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.reports ORDER BY report_row_id")).isEqualTo(beforeReports);
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.report_violations ORDER BY report_row_id, ordinal"))
+				.isEqualTo(beforeViolations);
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id")).isEqualTo(beforeGroups);
+
+		String reportId = UUID.randomUUID().toString();
+		assertThat(post(request(reportId, "Failed", MISSING.replace("customer_id", "nullable_field")),
+				"application/json").statusCode()).isEqualTo(201);
+		JsonNode updated = groupDetails(missing);
+		assertThat(updated.get("expectedType").isNull()).isTrue();
+		assertThat(updated.path("occurrenceCount").asLong()).isEqualTo(9007199254740994L);
+		JsonNode violation = details(integration, reportId).path("violations").get(0);
+		assertThat(violation.path("expectedType").asString()).isEqualTo("String");
+		assertThat(violation.path("groupId").asString()).isEqualTo(missing.toString());
+	}
+
+	@Test
 	void groupListSeesCommittedCountsTotalAndOrderTogether() throws Exception {
 		UUID updated = UUID.randomUUID();
 		UUID leader = UUID.randomUUID();
@@ -995,6 +1167,8 @@ class ReportIngestionTests {
 		}
 		JsonNode before = groupPage("", 2, 0, 20);
 		assertGroupIds(before, leader, updated);
+		JsonNode previous = groupDetails(updated);
+		assertThat(previous).isEqualTo(groupItem(before, updated));
 		try (Connection held = jdbc.getDataSource().getConnection()) {
 			held.setAutoCommit(false);
 			try {
@@ -1008,6 +1182,8 @@ class ReportIngestionTests {
 				}
 				insertGroup(held, created, "created", "2000-01-03T00:00:00Z");
 				assertThat(groupPage("", 2, 0, 20)).isEqualTo(before);
+				assertThat(groupDetails(updated)).isEqualTo(previous);
+				assertProblem(getGroupDetails(integration, created.toString(), ""), 404, "VIOLATION_GROUP_NOT_FOUND");
 				held.commit();
 				JsonNode after = groupPage("", 3, 0, 20);
 				assertGroupIds(after, updated, created, leader);
@@ -1015,6 +1191,13 @@ class ReportIngestionTests {
 				assertThat(item.path("occurrenceCount").asLong()).isEqualTo(2);
 				assertThat(item.path("firstSeenAt").asString()).isEqualTo("2000-01-01T00:00:00Z");
 				assertThat(item.path("lastSeenAt").asString()).isEqualTo("2000-01-04T00:00:00Z");
+				JsonNode detail = groupDetails(updated);
+				assertThat(detail).isEqualTo(item);
+				for (String field : List.of("groupId", "contractId", "contractVersion", "fieldName", "type",
+						"expectedType", "actualType", "firstSeenAt")) {
+					assertThat(detail.get(field)).isEqualTo(previous.get(field));
+				}
+				assertThat(groupDetails(created)).isEqualTo(groupItem(after, created));
 			} finally {
 				held.rollback();
 			}
@@ -1043,6 +1226,24 @@ class ReportIngestionTests {
 		URI uri = endpoint.resolve("/internal/v1/integrations/" + integrationId + "/violation-groups" + query);
 		return http.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(15)).GET().build(),
 				HttpResponse.BodyHandlers.ofString());
+	}
+
+	private HttpResponse<String> getGroupDetails(String integrationId, String groupId, String query) throws Exception {
+		URI uri = endpoint.resolve("/internal/v1/integrations/" + integrationId + "/violation-groups/" + groupId + query);
+		return http.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(15)).GET().build(),
+				HttpResponse.BodyHandlers.ofString());
+	}
+
+	private JsonNode groupDetails(UUID id) throws Exception {
+		var response = getGroupDetails(integration, id.toString(), "");
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/json");
+		JsonNode body = json.readTree(response.body());
+		assertThat(body.size()).isEqualTo(10);
+		assertThat(body.path("groupId").asString()).isEqualTo(id.toString());
+		assertThat(body.path("firstSeenAt").asString()).endsWith("Z");
+		assertThat(body.path("lastSeenAt").asString()).endsWith("Z");
+		return body;
 	}
 
 	private JsonNode groupPage(String query, long total, int offset, int limit) throws Exception {

@@ -65,6 +65,7 @@ Linux:
 | `GET /internal/v1/integrations/{integrationId}/reports` | История проверок | `200` |
 | `GET /internal/v1/integrations/{integrationId}/reports/{reportId}` | Подробности отчета с нарушениями | `200` |
 | `GET /internal/v1/integrations/{integrationId}/violation-groups` | Список групп нарушений | `200` |
+| `GET /internal/v1/integrations/{integrationId}/violation-groups/{groupId}` | Подробности группы нарушений | `200` |
 
 Запросы и ответы используют JSON. Успешный ответ: `application/json`, ошибка:
 `application/problem+json`. UUID передаются строками в записи 8-4-4-4-12 hex;
@@ -137,6 +138,66 @@ commit и содержит `integrationId`, `reportId`, `receivedAt`, `duplicate
 firstSeenAt/lastSeenAt соответствуют min/max receivedAt связанных отчетов.
 Счетчики передаются JSON-числами int64.
 
+### Подробности группы
+
+`GET /internal/v1/integrations/{integrationId}/violation-groups/{groupId}` возвращает
+один объект `ViolationGroup` с теми же десятью полями, что элемент списка групп.
+Пример с синтетическими данными:
+
+```json
+{
+  "groupId": "77777777-7777-4777-8777-777777777777",
+  "contractId": "33333333-3333-4333-8333-333333333333",
+  "contractVersion": 3,
+  "fieldName": "sample_field",
+  "type": "TypeMismatch",
+  "expectedType": "Number",
+  "actualType": "String",
+  "occurrenceCount": 3,
+  "firstSeenAt": "2026-10-16T09:00:00.123456Z",
+  "lastSeenAt": "2026-10-16T09:05:00Z"
+}
+```
+
+Оба UUID проверяются до обращения к БД; ошибки собираются вместе в `errors`
+по ключам `integrationId` и `groupId`. Регистр hex-букв любой, сокращения,
+скобки и пробелы недопустимы. Нулевой UUID синтаксически допустим.
+Query-параметров нет; неизвестные параметры игнорируются.
+
+Группа ищется одним параметризованным SELECT по паре integrationId + groupId.
+Неизвестная группа, чужая группа и неизвестная интеграция дают одинаковый
+`404 VIOLATION_GROUP_NOT_FOUND`. groupId совпадает со ссылкой в подробностях
+отчета. Для nullable groupId переход к группе не выполняется.
+
+Возвращаются сохраненные значения, без пересчета счетчика и повторной проверки
+отчета. occurrenceCount считает каждое появление, включая одинаковые элементы
+одного отчета. expectedType остается metadata создания группы, включая
+первоначальный null; metadata конкретного появления возвращает Task 7.
+Два контракта одной интеграции с одинаковым номером версии имеют разные группы.
+
+type: `RequiredFieldMissing`, `NullNotAllowed` или `TypeMismatch`.
+expectedType/actualType: `String`, `Number`, `Boolean`, `Object`, `Array` или
+явный `null`. Остальные поля обязательны. contractVersion имеет тип int32,
+occurrenceCount положительный int64 и передается числом без кавычек.
+Для точного разбора int64 выше 9007199254740991 в JavaScript нужен подходящий
+парсер; обычный response.json() теряет точность. Даты возвращаются в UTC с `Z`,
+с дробью до шести знаков; firstSeenAt <= lastSeenAt, равенство допустимо.
+
+Один ответ содержит согласованное состояние строки на начало SELECT.
+Незафиксированное обновление не видно, после commit следующий GET видит новые
+значения. Список и подробности читаются отдельными запросами: между ними
+новый отчет может изменить счетчик и время. Список отчетов группы не возвращается.
+
+| HTTP / code | detail |
+|---|---|
+| `400 INVALID_REQUEST` | Некорректные идентификаторы группы нарушений. |
+| `404 VIOLATION_GROUP_NOT_FOUND` | Группа нарушений не найдена в указанной интеграции. |
+| `503 STORAGE_UNAVAILABLE` | Хранилище отчетов временно недоступно. |
+| `500 INTERNAL_ERROR` | Не удалось прочитать группу нарушений. |
+
+Для 400 сообщение каждого UUID: «Требуется UUID в стандартной строковой записи.».
+Для остальных ошибок `errors={}`. Общий формат описан ниже.
+
 ### Ошибки
 
 Problem Details содержит `type`, `title`, `status`, `detail`, `instance`, `code`,
@@ -148,6 +209,7 @@ Problem Details содержит `type`, `title`, `status`, `detail`, `instance`
 | `400` | `INVALID_REQUEST` | Некорректный JSON, UUID или параметры чтения |
 | `400` | `VALIDATION_REPORT_INVALID` | Нарушение правил входного отчета |
 | `404` | `REPORT_NOT_FOUND` | Отчет не найден в указанной интеграции |
+| `404` | `VIOLATION_GROUP_NOT_FOUND` | Группа не найдена в указанной интеграции |
 | `415` | `UNSUPPORTED_MEDIA_TYPE` | Неподдерживаемый Content-Type входного отчета |
 | `503` | `STORAGE_UNAVAILABLE` | Хранилище временно недоступно |
 | `500` | `INTERNAL_ERROR` | Ошибка обработки или чтения |
@@ -166,7 +228,8 @@ Problem Details содержит `type`, `title`, `status`, `detail`, `instance`
 Тесты запуска используют исходную тестовую БД. Тесты хранения и HTTP создают
 собственные временные БД `monitoring_test_storage_...` и
 `monitoring_test_ingestion_...` и удаляют их после выполнения. Проверяются миграции,
-прием и дедупликация, транзакции, счетчики, история, подробности и список групп.
+прием и дедупликация, транзакции, счетчики, история, подробности отчетов,
+список и подробности групп.
 Без тестовых переменных PostgreSQL-проверки пропускаются; количество пропусков
 указано в `target/surefire-reports`.
 
