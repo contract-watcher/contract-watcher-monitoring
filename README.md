@@ -66,6 +66,21 @@ Linux:
 | `GET /internal/v1/integrations/{integrationId}/reports/{reportId}` | Подробности отчета с нарушениями | `200` |
 | `GET /internal/v1/integrations/{integrationId}/violation-groups` | Список групп нарушений | `200` |
 | `GET /internal/v1/integrations/{integrationId}/violation-groups/{groupId}` | Подробности группы нарушений | `200` |
+| `GET /internal/v1/integrations/{integrationId}/summary` | Сводка сохраненных отчетов | `200` |
+
+### OpenAPI и Swagger UI
+
+После запуска откройте [Swagger UI](http://localhost:8080/swagger-ui.html).
+Сгенерированная [OpenAPI 3.0.3](http://localhost:8080/v3/api-docs) содержит все шесть
+бизнес-операций, их DTO, параметры, ошибки и синтетические примеры.
+Если задан `MONITORING_PORT`, используйте его вместо 8080. Для запроса раскройте
+операцию, нажмите `Try it out`, заполните параметры и нажмите `Execute`.
+
+Спецификация строится из контроллеров и DTO через
+[springdoc 3.1.1](https://springdoc.org/). Общая настройка дополняет правила UUID,
+UTC, int64 и Problem Details; ошибки ControllerAdvice не добавляются автоматически.
+Отдельного файла спецификации и генерации клиентов нет. Проверка credentials
+в текущем Monitoring отсутствует; назначение пути как внутреннего не является защитой.
 
 Запросы и ответы используют JSON. Успешный ответ: `application/json`, ошибка:
 `application/problem+json`. UUID передаются строками в записи 8-4-4-4-12 hex;
@@ -198,6 +213,25 @@ occurrenceCount положительный int64 и передается чис�
 Для 400 сообщение каждого UUID: «Требуется UUID в стандартной строковой записи.».
 Для остальных ошибок `errors={}`. Общий формат описан ниже.
 
+### Сводка интеграции
+
+`GET /internal/v1/integrations/{integrationId}/summary` возвращает `integrationId`,
+`totalReports`, `passedReports`, `failedReports`, `lastReceivedAt`. Счетчики считают
+сохраненные отчеты всех контрактов и версий за весь период; total равен сумме
+Passed и Failed. Нарушения, группы и появления в эти счетчики не входят.
+
+Один параметризованный SELECT читает общий снимок агрегатов без отдельной
+транзакции приложения. `lastReceivedAt` равен MAX сохраненного receivedAt,
+а не времени последнего commit. Duplicate не меняет сводку. Пустая или неизвестная
+Monitoring интеграция получает `200`, нули и явный `lastReceivedAt:null`.
+Существование интеграции в Core не проверяется. Query-параметров нет.
+
+UUID проверяется до БД. Ошибки: `400 INVALID_REQUEST` с detail
+«Некорректный идентификатор интеграции.», `503 STORAGE_UNAVAILABLE` либо
+`500 INTERNAL_ERROR` с detail «Не удалось прочитать сводку интеграции.».
+Техническая ошибка не заменяется нулями. Счетчики имеют полный диапазон int64;
+правило точного разбора в JavaScript применимо и к сводке.
+
 ### Ошибки
 
 Problem Details содержит `type`, `title`, `status`, `detail`, `instance`, `code`,
@@ -229,9 +263,16 @@ Problem Details содержит `type`, `title`, `status`, `detail`, `instance`
 собственные временные БД `monitoring_test_storage_...` и
 `monitoring_test_ingestion_...` и удаляют их после выполнения. Проверяются миграции,
 прием и дедупликация, транзакции, счетчики, история, подробности отчетов,
-список и подробности групп.
+список и подробности групп, сводка и генерация OpenAPI/ресурсы Swagger UI.
 Без тестовых переменных PostgreSQL-проверки пропускаются; количество пропусков
 указано в `target/surefire-reports`.
+
+Проверка от 19.10.2026: Maven Wrapper verify на JDK 21 с PostgreSQL 12.18 прошел,
+57 тестов, ошибок и пропусков нет. Независимый OpenAPI-валидатор проверил структуру,
+все 36 примеров и реальные ответы шести операций; запрос summary выполнен через UI.
+Общая интеграция SDK -> Core -> Monitoring -> Frontend остается отдельной проверкой:
+в текущем Core еще нет передачи отчетов и read-фасадов Monitoring, Common не содержит
+материалов summary. Эти зависимости не меняют реализованный HTTP-контракт Monitoring.
 
 Для ручных запросов: [коллекция приема отчетов](postman/report-receiving.postman_collection.json)
 и [инструкция Postman](postman/README.md). Примеры остальных запросов находятся в Common.
