@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Monitoring: ручная проверка приема отчетов",
-    "description": "Запускайте запросы по порядку в отдельной локальной БД без рабочих данных. Новые ID создаются автоматически. Запрос 3 повторяет Failed из запроса 2 и не меняет группы. Авторизация пока не реализована. Не содержит настроек подключения к БД или секретов.",
+    "description": "Запускайте запросы по порядку в отдельной локальной БД без рабочих данных. Новые ID создаются автоматически. Запрос 3 повторяет Failed из запроса 2 и не меняет группы. Авторизация пока не реализована. Не содержит настроек подключения к БД или секретов. report.timestamp задается отправителем; повтор использует прежнее время.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -63,6 +63,7 @@
               "  pm.expect(body.integrationId).to.eql(pm.collectionVariables.get(\"integrationId\"));",
               "  pm.expect(body.duplicate).to.eql(false);",
               "  pm.expect(body.receivedAt).to.match(/Z$/);",
+              "  pm.expect(body.receivedAt).to.eql(\"2026-10-20T10:00:00.123456Z\");",
               "  pm.expect(Number.isNaN(Date.parse(body.receivedAt))).to.eql(false);",
               "});"
             ]
@@ -79,7 +80,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{passedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Passed\",\n    \"violations\": []\n  }\n}",
+          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{passedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Passed\",\n    \"timestamp\": \"2026-10-20T10:00:00.123456Z\",\n    \"violations\": []\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -115,6 +116,7 @@
               "  pm.expect(body.integrationId).to.eql(pm.collectionVariables.get(\"integrationId\"));",
               "  pm.expect(body.duplicate).to.eql(false);",
               "  pm.expect(body.receivedAt).to.match(/Z$/);",
+              "  pm.expect(body.receivedAt).to.eql(\"2026-10-20T10:01:00.123456Z\");",
               "  pm.expect(Number.isNaN(Date.parse(body.receivedAt))).to.eql(false);",
               "});"
             ]
@@ -131,7 +133,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{failedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Failed\",\n    \"violations\": [\n      {\n        \"fieldName\": \"customer_id\",\n        \"type\": \"RequiredFieldMissing\",\n        \"expectedType\": \"String\",\n        \"actualType\": null\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"optional\",\n        \"type\": \"NullNotAllowed\",\n        \"expectedType\": \"Boolean\"\n      }\n    ]\n  }\n}",
+          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{failedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Failed\",\n    \"timestamp\": \"2026-10-20T10:01:00.123456Z\",\n    \"violations\": [\n      {\n        \"fieldName\": \"customer_id\",\n        \"type\": \"RequiredFieldMissing\",\n        \"expectedType\": \"String\",\n        \"actualType\": null\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"optional\",\n        \"type\": \"NullNotAllowed\",\n        \"expectedType\": \"Boolean\"\n      }\n    ]\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -174,7 +176,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{failedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Failed\",\n    \"violations\": [\n      {\n        \"fieldName\": \"customer_id\",\n        \"type\": \"RequiredFieldMissing\",\n        \"expectedType\": \"String\",\n        \"actualType\": null\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"optional\",\n        \"type\": \"NullNotAllowed\",\n        \"expectedType\": \"Boolean\"\n      }\n    ]\n  }\n}",
+          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{failedReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Failed\",\n    \"timestamp\": \"2026-10-20T10:01:00.123456Z\",\n    \"violations\": [\n      {\n        \"fieldName\": \"customer_id\",\n        \"type\": \"RequiredFieldMissing\",\n        \"expectedType\": \"String\",\n        \"actualType\": null\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"String\"\n      },\n      {\n        \"fieldName\": \"optional\",\n        \"type\": \"NullNotAllowed\",\n        \"expectedType\": \"Boolean\"\n      }\n    ]\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -226,7 +228,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{invalidReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Failed\",\n    \"violations\": [\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"Number\"\n      }\n    ]\n  }\n}",
+          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{invalidReportId}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Failed\",\n    \"timestamp\": \"2026-10-20T10:01:00.123456Z\",\n    \"violations\": [\n      {\n        \"fieldName\": \"amount\",\n        \"type\": \"TypeMismatch\",\n        \"expectedType\": \"Number\",\n        \"actualType\": \"Number\"\n      }\n    ]\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -310,7 +312,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{$guid}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Passed\",\n    \"violations\": []\n  }\n}",
+          "raw": "{\n  \"integrationId\": \"{{integrationId}}\",\n  \"contractId\": \"{{contractId}}\",\n  \"report\": {\n    \"reportId\": \"{{$guid}}\",\n    \"contractVersion\": 3,\n    \"status\": \"Passed\",\n    \"timestamp\": \"2026-10-20T10:00:00.123456Z\",\n    \"violations\": []\n  }\n}",
           "options": {
             "raw": {
               "language": "text"

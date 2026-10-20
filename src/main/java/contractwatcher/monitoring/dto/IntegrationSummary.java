@@ -11,6 +11,6 @@ public record IntegrationSummary(UUID integrationId,
 		@Schema(description = "Число сохраненных отчетов всех контрактов и версий; равно passedReports + failedReports.", minimum = "0") long totalReports,
 		@Schema(description = "Число отчетов Passed.", minimum = "0") long passedReports,
 		@Schema(description = "Число отчетов Failed, независимо от количества нарушений.", minimum = "0") long failedReports,
-		@Schema(description = "Максимум receivedAt (начало сохраняющей транзакции, не commit или время SDK); null без отчетов.", nullable = true)
+		@Schema(description = "Максимум сохраненного времени формирования отчетов SDK из report.timestamp; null без отчетов.", nullable = true)
 		Instant lastReceivedAt) {
 }

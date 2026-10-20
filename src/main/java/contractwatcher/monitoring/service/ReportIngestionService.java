@@ -54,7 +54,7 @@ public final class ReportIngestionService {
 			return new ReportAccepted(report.integrationId(), report.reportId(), previous.receivedAt(), true);
 		}
 		var stored = inserted.orElseThrow();
-		// Общий порядок групп исключает противоположный захват блокировок; ordinal остается исходным.
+		// Lock groups in one order; preserve the original violation ordinals.
 		for (Violation violation : report.violations().stream().sorted(GROUP_LOCK_ORDER).toList()) {
 			var groupId = groups.recordOccurrence(report, violation, stored.receivedAt());
 			violations.insert(stored.rowId(), violation, groupId);

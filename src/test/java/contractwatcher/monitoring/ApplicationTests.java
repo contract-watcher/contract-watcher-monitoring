@@ -30,7 +30,7 @@ class ApplicationTests {
 		assertThat(jdbc.queryForList("""
 				SELECT version FROM monitoring.flyway_schema_history
 				WHERE version IS NOT NULL AND success ORDER BY installed_rank
-				""", String.class)).containsExactly("1", "2", "3");
+				""", String.class)).containsExactly("1", "2", "3", "4");
 		assertThat(flyway.info().pending()).isEmpty();
 		flyway.validate();
 	}
