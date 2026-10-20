@@ -5,6 +5,7 @@ import contractwatcher.monitoring.dto.ReportViolation;
 import contractwatcher.monitoring.dto.ValidationReport;
 import contractwatcher.monitoring.exception.ReportValidationException;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,6 +19,8 @@ final class ReportValidator {
 
 	private static final Pattern UUID_FORMAT = Pattern.compile(
 			"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+	private static final Instant FIRST_TIMESTAMP = Instant.parse("0001-01-01T00:00:00Z");
+	private static final Instant AFTER_LAST_TIMESTAMP = Instant.parse("+10000-01-01T00:00:00Z");
 
 	void validate(ReportRequest request) {
 		Map<String, List<String>> errors = new LinkedHashMap<>();
@@ -37,6 +40,10 @@ final class ReportValidator {
 			add(errors, "report.contractVersion", "Версия должна быть положительным целым числом.");
 		}
 		required(report.status(), "report.status", errors);
+		if (required(report.timestamp(), "report.timestamp", errors)
+				&& (report.timestamp().isBefore(FIRST_TIMESTAMP) || !report.timestamp().isBefore(AFTER_LAST_TIMESTAMP))) {
+			add(errors, "report.timestamp", "Требуется время с годом 0001-9999 после приведения к UTC.");
+		}
 		if (!required(report.violations(), "report.violations", errors)) {
 			return;
 		}

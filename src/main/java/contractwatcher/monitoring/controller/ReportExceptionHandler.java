@@ -118,7 +118,7 @@ final class ReportExceptionHandler {
 
 	private boolean storageUnavailable(Throwable exception) {
 		for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
-			// Ошибка rollback может скрыть исходную потерю соединения.
+			// A rollback failure can hide the original connection failure.
 			if (cause instanceof TransactionSystemException transaction
 					&& transaction.getApplicationException() != null
 					&& storageUnavailable(transaction.getApplicationException())) {

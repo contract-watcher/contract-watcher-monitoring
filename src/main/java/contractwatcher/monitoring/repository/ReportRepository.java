@@ -31,12 +31,12 @@ public class ReportRepository {
 	public Optional<StoredReport> insertIfNew(ReportToStore report) {
 		var inserted = jdbc.query("""
 				INSERT INTO monitoring.reports
-				(external_report_id, integration_id, contract_id, contract_version, outcome)
-				VALUES (?, ?, ?, ?, ?)
+				(external_report_id, integration_id, contract_id, contract_version, outcome, received_at)
+				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT ON CONSTRAINT reports_integration_report_unique DO NOTHING
 				RETURNING report_row_id, received_at
 				""", ReportRepository::storedReport, report.reportId(), report.integrationId(), report.contractId(),
-				report.contractVersion(), report.outcome());
+				report.contractVersion(), report.outcome(), report.timestamp().atOffset(ZoneOffset.UTC));
 		if (inserted.size() > 1) {
 			throw new IllegalStateException("Неожиданное число сохраненных отчетов.");
 		}
@@ -44,7 +44,7 @@ public class ReportRepository {
 	}
 
 	public StoredReport find(UUID integrationId, UUID reportId) {
-		// Отдельный SELECT видит commit конкурента, которого мог не видеть INSERT.
+		// A new statement can see the concurrent insert that just committed.
 		return jdbc.queryForObject("""
 				SELECT report_row_id, received_at FROM monitoring.reports
 				WHERE integration_id = ? AND external_report_id = ?

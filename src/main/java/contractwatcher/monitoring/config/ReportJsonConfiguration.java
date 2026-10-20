@@ -1,5 +1,7 @@
 package contractwatcher.monitoring.config;
 
+import java.time.Instant;
+
 import contractwatcher.monitoring.dto.ReportViolation;
 import contractwatcher.monitoring.dto.ValidationReport;
 
@@ -17,11 +19,12 @@ class ReportJsonConfiguration {
 
 	@Bean
 	JsonMapperBuilderCustomizer strictReportJson() {
-		SimpleModule enums = new SimpleModule();
-		enums.addDeserializer(ValidationReport.Status.class, new ExactEnumDeserializer<>(ValidationReport.Status.class));
-		enums.addDeserializer(ReportViolation.Kind.class, new ExactEnumDeserializer<>(ReportViolation.Kind.class));
-		enums.addDeserializer(ReportViolation.JsonType.class, new ExactEnumDeserializer<>(ReportViolation.JsonType.class));
-		return builder -> builder.addModule(enums)
+		SimpleModule reportTypes = new SimpleModule();
+		reportTypes.addDeserializer(ValidationReport.Status.class, new ExactEnumDeserializer<>(ValidationReport.Status.class));
+		reportTypes.addDeserializer(ReportViolation.Kind.class, new ExactEnumDeserializer<>(ReportViolation.Kind.class));
+		reportTypes.addDeserializer(ReportViolation.JsonType.class, new ExactEnumDeserializer<>(ReportViolation.JsonType.class));
+		reportTypes.addDeserializer(Instant.class, new ReportTimestampDeserializer());
+		return builder -> builder.addModule(reportTypes)
 				.withCoercionConfig(LogicalType.Integer, config -> config
 						.setCoercion(CoercionInputShape.String, CoercionAction.Fail)
 						.setCoercion(CoercionInputShape.EmptyString, CoercionAction.Fail)

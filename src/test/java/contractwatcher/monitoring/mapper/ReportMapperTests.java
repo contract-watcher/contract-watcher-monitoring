@@ -2,6 +2,7 @@ package contractwatcher.monitoring.mapper;
 
 import java.util.List;
 import java.util.UUID;
+import java.time.Instant;
 
 import org.junit.jupiter.api.Test;
 
@@ -23,7 +24,7 @@ class ReportMapperTests {
 		UUID contract = UUID.randomUUID();
 		UUID reportId = UUID.randomUUID();
 		var request = new ReportRequest(integration.toString(), contract.toString(),
-				new ValidationReport(reportId.toString(), 3, Status.Passed, List.of()));
+				new ValidationReport(reportId.toString(), 3, Status.Passed, Instant.parse("2026-10-20T10:00:00.1234567Z"), List.of()));
 
 		var stored = ReportMapper.toStorage(request);
 
@@ -32,6 +33,7 @@ class ReportMapperTests {
 		assertThat(stored.reportId()).isEqualTo(reportId);
 		assertThat(stored.contractVersion()).isEqualTo(3);
 		assertThat(stored.outcome()).isEqualTo("PASSED");
+		assertThat(stored.timestamp()).isEqualTo(Instant.parse("2026-10-20T10:00:00.123456Z"));
 		assertThat(stored.violations()).isEmpty();
 	}
 
@@ -73,6 +75,6 @@ class ReportMapperTests {
 
 	private ReportRequest failed(List<ReportViolation> violations) {
 		return new ReportRequest(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
-				new ValidationReport(UUID.randomUUID().toString(), 3, Status.Failed, violations));
+				new ValidationReport(UUID.randomUUID().toString(), 3, Status.Failed, Instant.parse("2026-10-20T10:00:00Z"), violations));
 	}
 }

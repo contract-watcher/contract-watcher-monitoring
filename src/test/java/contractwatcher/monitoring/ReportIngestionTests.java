@@ -51,6 +51,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ReportIngestionTests {
 
 	private String integration;
+	private static final java.util.concurrent.atomic.AtomicLong REPORT_SEQUENCE = new java.util.concurrent.atomic.AtomicLong();
 	private static final String CONTRACT = "33333333-3333-4333-8333-333333333333";
 	private static final String MISSING = """
 			{"fieldName":"customer_id","type":"RequiredFieldMissing","expectedType":"String","actualType":null}
@@ -117,9 +118,9 @@ class ReportIngestionTests {
 	}
 
 	@Test
-	void acceptsPassedAndConfirmsCommittedDatabaseTime() throws Exception {
+	void acceptsPassedAndPersistsProvidedSdkTime() throws Exception {
 		String id = UUID.randomUUID().toString();
-		HttpResponse<String> response = post(request(id, "Passed", ""), "application/json");
+		HttpResponse<String> response = post(request(id, "Passed", "", "2026-10-20T13:00:00.1234567+03:00"), "application/json");
 		assertThat(response.statusCode()).isEqualTo(201);
 		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/json");
 		assertThat(response.headers().firstValue("Location")).isEmpty();
@@ -133,6 +134,7 @@ class ReportIngestionTests {
 		assertThat(stored).containsEntry("outcome", "PASSED").containsEntry("contract_version", 3)
 				.containsEntry("contract_id", UUID.fromString(CONTRACT));
 		Instant storedTime = receivedAt(integration, id);
+		assertThat(storedTime).isEqualTo(Instant.parse("2026-10-20T10:00:00.123456Z"));
 		assertThat(Instant.parse(body.path("receivedAt").asString())).isEqualTo(storedTime);
 		assertThat(violations(id)).isEmpty();
 	}
@@ -1317,6 +1319,13 @@ class ReportIngestionTests {
 			}
 		}
 		var schemas = api.path("components").path("schemas");
+		var report = schemas.path("ValidationReport");
+		assertThat(report.path("required").valueStream().map(JsonNode::asString).toList()).contains("timestamp");
+		var timestamp = report.path("properties").path("timestamp");
+		assertThat(timestamp.path("type").asString()).isEqualTo("string");
+		assertThat(timestamp.path("format").asString()).isEqualTo("date-time");
+		assertThat(timestamp.path("pattern").asString()).isEqualTo(contractwatcher.monitoring.dto.ApiSchema.REPORT_TIMESTAMP_PATTERN);
+		assertThat(timestamp.path("nullable").asBoolean()).isFalse();
 		var summary = schemas.path("IntegrationSummary");
 		assertThat(summary.path("required").valueStream().map(JsonNode::asString).toList())
 				.containsExactlyInAnyOrder("integrationId", "totalReports", "passedReports", "failedReports", "lastReceivedAt");
@@ -1336,6 +1345,55 @@ class ReportIngestionTests {
 		var config = json.readTree(getResource("/v3/api-docs/swagger-config").body());
 		assertThat(config.path("url").asString()).isEqualTo("/v3/api-docs");
 		assertThat(getResource("/swagger-ui/swagger-ui-bundle.js").statusCode()).isEqualTo(200);
+	}
+
+	@Test
+	void rejectsMissingNullAndMalformedTimestampWithoutWriting(CapturedOutput output) throws Exception {
+		String timestamp = "2026-10-20T10:00:00Z";
+		String valid = request(UUID.randomUUID().toString(), "Passed", "", timestamp);
+		String property = "\"timestamp\":\"" + timestamp + "\"";
+		var before = summaryTables();
+		for (String body : List.of(valid.replace(property + ",", ""), valid.replace(property, "\"timestamp\":null"))) {
+			var problem = assertProblem(post(body, "application/json"), 400, "VALIDATION_REPORT_INVALID");
+			assertThat(problem.path("errors").propertyNames()).containsExactly("report.timestamp");
+			assertThat(problem.path("errors").path("report.timestamp").get(0).asString()).isEqualTo("Обязательное поле.");
+		}
+		for (String value : List.of("42", "true", "[]", "\"\"", "\"timestamp-invalid-sample\"",
+				"\"2026-10-20T10:00:00\"", "\"2026-02-30T10:00:00Z\"", "\"2026-10-20T24:00:00Z\"",
+				"\"2026-10-20T10:00:60Z\"", "\"2026-10-20T10:00:00+19:00\"", "\"2026-10-20T10:00:00.1234567890Z\"")) {
+			assertProblem(post(valid.replace(property, "\"timestamp\":" + value), "application/json"), 400, "INVALID_REQUEST");
+		}
+		var range = assertProblem(post(request(UUID.randomUUID().toString(), "Passed", "", "0001-01-01T00:00:00+01:00"),
+				"application/json"), 400, "VALIDATION_REPORT_INVALID");
+		assertThat(range.path("errors").propertyNames()).containsExactly("report.timestamp");
+		assertThat(summaryTables()).isEqualTo(before);
+		assertThat(output.getAll()).doesNotContain("timestamp-invalid-sample");
+	}
+
+	@Test
+	void sdkTimeControlsHistoryGroupsAndSummaryRegardlessOfDeliveryOrder() throws Exception {
+		String late = UUID.randomUUID().toString();
+		String early = UUID.randomUUID().toString();
+		String passed = UUID.randomUUID().toString();
+		var accepted = confirmation(post(request(late, "Failed", MISSING, "2026-10-20T12:00:00.1234567+03:00"),
+				"application/json"), 201, integration, late);
+		assertThat(accepted.path("receivedAt").asString()).isEqualTo("2026-10-20T09:00:00.123456Z");
+		assertThat(post(request(early, "Failed", MISSING, "2026-10-19T10:00:00+00:00"), "application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(passed, "Passed", "", "2026-10-20T08:00:00Z"), "application/json").statusCode()).isEqualTo(201);
+		assertHistoryIds(history("", 3, 0, 20), late, passed, early);
+		assertHistoryIds(history("?from=2026-10-20T00:00:00Z&to=2026-10-21T00:00:00Z", 2, 0, 20), late, passed);
+		var group = groupPage("", 1, 0, 20).path("items").get(0);
+		assertThat(group.path("occurrenceCount").asLong()).isEqualTo(2);
+		assertThat(group.path("firstSeenAt").asString()).isEqualTo("2026-10-19T10:00:00Z");
+		assertThat(group.path("lastSeenAt").asString()).isEqualTo("2026-10-20T09:00:00.123456Z");
+		assertThat(groupDetails(UUID.fromString(group.path("groupId").asString()))).isEqualTo(group);
+		assertThat(details(integration, late).path("receivedAt")).isEqualTo(accepted.path("receivedAt"));
+		var summary = summary(integration, 3, 1, 2);
+		assertThat(summary.path("lastReceivedAt")).isEqualTo(accepted.path("receivedAt"));
+		var before = summaryTables();
+		assertDuplicate(post(request(late, "Failed", MISSING, "2030-01-01T00:00:00Z"), "application/json"), accepted);
+		assertThat(summary(integration, 3, 1, 2)).isEqualTo(summary);
+		assertThat(summaryTables()).isEqualTo(before);
 	}
 
 	private HttpResponse<String> getResource(String path) throws Exception {
@@ -1644,10 +1702,15 @@ class ReportIngestionTests {
 	}
 
 	private String request(String id, String status, String violations) {
+		String timestamp = Instant.parse("2026-10-20T00:00:00Z").plusSeconds(REPORT_SEQUENCE.incrementAndGet()).toString();
+		return request(id, status, violations, timestamp);
+	}
+
+	private String request(String id, String status, String violations, String timestamp) {
 		return """
 				{"integrationId":"%s","contractId":"%s","report":{
-				"reportId":"%s","contractVersion":3,"status":"%s","violations":[%s]}}
-				""".formatted(integration, CONTRACT, id, status, violations);
+				"reportId":"%s","contractVersion":3,"status":"%s","timestamp":"%s","violations":[%s]}}
+				""".formatted(integration, CONTRACT, id, status, timestamp, violations);
 	}
 
 	private HttpResponse<String> post(String body, String contentType) throws Exception {

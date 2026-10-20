@@ -36,7 +36,8 @@ class OpenApiConfiguration {
 				.info(new Info().title("ContractWatch Monitoring").version("1.0.0").description(
 						"Внутренний API хранения отчетов. Проверка credentials в Monitoring пока отсутствует. "
 						+ "UUID: полная запись 8-4-4-4-12, любой регистр hex и нулевой UUID допустимы; проверяются до БД. "
-						+ "Время ответа: UTC/Z, дробь до 6 знаков. Nullable-поля ответа присутствуют явно. "
+						+ "receivedAt и времена групп/сводки основаны на report.timestamp SDK; прежние имена полей сохранены. "
+						+ "Время ответа: UTC/Z, дробь до 6 знаков. Старые записи сохраняют прежнее время. Nullable-поля ответа присутствуют явно. "
 						+ "Счетчики: точные JSON-целые int64; в JavaScript выше 9007199254740991 нужен парсер без потери точности. "
 						+ "Неизвестные query-параметры игнорируются. Отдельные HTTP-запросы читают независимые снимки."))
 				.tags(List.of(new Tag().name("Отчеты").description("Прием, история и сохраненные нарушения."),
@@ -71,7 +72,7 @@ class OpenApiConfiguration {
 			schema.setPattern(ApiSchema.UUID_PATTERN);
 			schema.setMinLength(36);
 			schema.setMaxLength(36);
-		} else if ("date-time".equals(schema.getFormat())) {
+		} else if ("date-time".equals(schema.getFormat()) && schema.getPattern() == null) {
 			schema.setPattern(ApiSchema.UTC_PATTERN);
 		} else if ("int64".equals(schema.getFormat())) {
 			schema.setMaximum(new BigDecimal(ApiSchema.MAX_LONG));

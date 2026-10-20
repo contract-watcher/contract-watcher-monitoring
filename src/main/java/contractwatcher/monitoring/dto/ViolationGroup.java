@@ -14,6 +14,6 @@ public record ViolationGroup(UUID groupId, UUID contractId,
 		@Schema(nullable = true, description = "Metadata создавшего группу появления; не входит в ключ и не обновляется.") ReportViolation.JsonType expectedType,
 		@Schema(nullable = true) ReportViolation.JsonType actualType,
 		@Schema(minimum = "1", maximum = ApiSchema.MAX_LONG, description = "Каждый элемент violations нового отчета, включая одинаковые, дает одно появление.") long occurrenceCount,
-		@Schema(description = "Минимум receivedAt связанных отчетов.") Instant firstSeenAt,
-		@Schema(description = "Максимум receivedAt связанных отчетов; firstSeenAt <= lastSeenAt.") Instant lastSeenAt) {
+		@Schema(description = "Минимум сохраненного времени SDK связанных отчетов.") Instant firstSeenAt,
+		@Schema(description = "Максимум сохраненного времени SDK связанных отчетов; firstSeenAt <= lastSeenAt.") Instant lastSeenAt) {
 }

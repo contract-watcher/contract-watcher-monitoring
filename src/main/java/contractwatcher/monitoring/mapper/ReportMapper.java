@@ -1,5 +1,6 @@
 package contractwatcher.monitoring.mapper;
 
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import java.util.stream.IntStream;
 
@@ -21,8 +22,10 @@ public final class ReportMapper {
 			case Passed -> "PASSED";
 			case Failed -> "FAILED";
 		};
+		// Truncate before JDBC to avoid rounding beyond microseconds.
 		return new ReportToStore(UUID.fromString(request.integrationId()), UUID.fromString(request.contractId()),
-				UUID.fromString(report.reportId()), report.contractVersion(), outcome, violations);
+				UUID.fromString(report.reportId()), report.contractVersion(), outcome,
+				report.timestamp().truncatedTo(ChronoUnit.MICROS), violations);
 	}
 
 	private static ReportToStore.Violation toStorage(int ordinal, ReportViolation violation) {
