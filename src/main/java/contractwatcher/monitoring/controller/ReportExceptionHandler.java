@@ -7,6 +7,7 @@ import contractwatcher.monitoring.exception.ReportNotFoundException;
 import contractwatcher.monitoring.exception.ViolationGroupsRequestException;
 import contractwatcher.monitoring.exception.ViolationGroupDetailsRequestException;
 import contractwatcher.monitoring.exception.ViolationGroupNotFoundException;
+import contractwatcher.monitoring.exception.IntegrationSummaryRequestException;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -49,6 +50,11 @@ final class ReportExceptionHandler {
 	ResponseEntity<ProblemDetail> invalidReport(ReportValidationException exception, HttpServletRequest request) {
 		return problem(request, HttpStatus.BAD_REQUEST, "VALIDATION_REPORT_INVALID",
 				"Отчет содержит некорректные данные.", exception.errors());
+	}
+
+	@ExceptionHandler(IntegrationSummaryRequestException.class)
+	ResponseEntity<ProblemDetail> invalidSummary(IntegrationSummaryRequestException exception, HttpServletRequest request) {
+		return problem(request, HttpStatus.BAD_REQUEST, "INVALID_REQUEST", exception.getMessage(), exception.errors());
 	}
 
 	@ExceptionHandler(ViolationGroupsRequestException.class)
@@ -95,6 +101,9 @@ final class ReportExceptionHandler {
 
 	private String failureDetail(HttpServletRequest request) {
 		if ("GET".equals(request.getMethod())) {
+			if (IntegrationSummaryController.PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))) {
+				return "Не удалось прочитать сводку интеграции.";
+			}
 			if (ViolationGroupsController.DETAILS_PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))) {
 				return "Не удалось прочитать группу нарушений.";
 			}

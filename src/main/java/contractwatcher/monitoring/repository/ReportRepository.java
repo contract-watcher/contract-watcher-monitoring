@@ -17,6 +17,7 @@ import contractwatcher.monitoring.model.ReportDetailsEntry;
 import contractwatcher.monitoring.model.ReportHistoryEntry;
 import contractwatcher.monitoring.model.ReportHistoryQuery;
 import contractwatcher.monitoring.model.StoredReport;
+import contractwatcher.monitoring.dto.IntegrationSummary;
 
 @Repository
 public class ReportRepository {
@@ -54,6 +55,20 @@ public class ReportRepository {
 		var filter = historyFilter(query);
 		return jdbc.queryForObject("SELECT count(*) FROM monitoring.reports r WHERE " + filter.sql(),
 				Long.class, filter.values().toArray());
+	}
+
+	public IntegrationSummary summary(UUID integrationId) {
+		return jdbc.queryForObject("""
+				SELECT count(*) AS total_reports,
+				       count(*) FILTER (WHERE outcome = 'PASSED') AS passed_reports,
+				       count(*) FILTER (WHERE outcome = 'FAILED') AS failed_reports,
+				       max(received_at) AS last_received_at
+				FROM monitoring.reports WHERE integration_id = ?
+				""", (row, index) -> {
+			var lastReceivedAt = row.getObject("last_received_at", OffsetDateTime.class);
+			return new IntegrationSummary(integrationId, row.getLong("total_reports"), row.getLong("passed_reports"),
+					row.getLong("failed_reports"), lastReceivedAt == null ? null : lastReceivedAt.toInstant());
+		}, integrationId);
 	}
 
 	public Optional<ReportDetailsEntry> findDetails(UUID integrationId, UUID reportId) {

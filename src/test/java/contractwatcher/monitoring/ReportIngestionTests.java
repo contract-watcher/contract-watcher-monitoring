@@ -1204,6 +1204,184 @@ class ReportIngestionTests {
 		}
 	}
 
+	@Test
+	void summaryCountsReportsAcrossContractsAndVersionsAndIgnoresDuplicate() throws Exception {
+		String failed = UUID.randomUUID().toString();
+		String passed = UUID.randomUUID().toString();
+		assertThat(post(request(passed, "Passed", ""), "application/json").statusCode()).isEqualTo(201);
+		var accepted = confirmation(post(request(failed, "Failed", String.join(",", MISMATCH, MISMATCH, MISSING)),
+				"application/json"), 201, integration, failed);
+		assertThat(violations(failed)).hasSize(3);
+		assertThat(groups()).hasSize(2);
+		assertThat(groups().stream().mapToLong(row -> (long) row.get("occurrence_count")).sum()).isEqualTo(3);
+		assertThat(post(request(UUID.randomUUID().toString(), "Failed", MISSING).replace("\"contractVersion\":3", "\"contractVersion\":4"),
+				"application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(UUID.randomUUID().toString(), "Passed", "").replace(CONTRACT, UUID.randomUUID().toString()),
+				"application/json").statusCode()).isEqualTo(201);
+		String other = UUID.randomUUID().toString();
+		assertThat(post(request(failed, "Passed", "").replace(integration, other), "application/json").statusCode()).isEqualTo(201);
+		var before = summaryTables();
+		var body = summary(integration, 4, 2, 2);
+		Instant maximum = jdbc.queryForObject("SELECT max(received_at) FROM monitoring.reports WHERE integration_id = ?",
+				(row, index) -> row.getObject(1, OffsetDateTime.class).toInstant(), UUID.fromString(integration));
+		assertThat(Instant.parse(body.path("lastReceivedAt").asString())).isEqualTo(maximum);
+		summary(other, 1, 1, 0);
+		assertThat(json.readTree(getSummary(integration, "?status=Failed&limit=1").body())).isEqualTo(body);
+		assertThat(summaryTables()).isEqualTo(before);
+		assertDuplicate(post(request(failed, "Passed", ""), "application/json"), accepted);
+		assertThat(summary(integration, 4, 2, 2)).isEqualTo(body);
+		assertThat(summaryTables()).isEqualTo(before);
+	}
+
+	@Test
+	void summaryReturnsZerosAndValidatesUuid(CapturedOutput output) throws Exception {
+		for (String id : List.of(integration, UUID.randomUUID().toString(), "00000000-0000-0000-0000-000000000000")) {
+			assertThat(summary(id, 0, 0, 0).path("lastReceivedAt").isNull()).isTrue();
+		}
+		assertThat(summary(integration.toUpperCase(Locale.ROOT), 0, 0, 0).path("integrationId").asString()).isEqualTo(integration);
+		var before = summaryTables();
+		for (String id : List.of("not-a-uuid", "1-1-1-1-1", "%20" + integration, "%7B" + integration + "%7D")) {
+			var body = assertProblem(getSummary(id, "?ignored=sample"), 400, "INVALID_REQUEST");
+			assertThat(body.size()).isEqualTo(7);
+			assertThat(body.path("detail").asString()).isEqualTo("Некорректный идентификатор интеграции.");
+			assertThat(body.path("errors").size()).isEqualTo(1);
+			assertThat(body.path("errors").path("integrationId").get(0).asString())
+					.isEqualTo("Требуется UUID в стандартной строковой записи.");
+		}
+		assertThat(summaryTables()).isEqualTo(before);
+		assertThat(output.getAll()).doesNotContain("not-a-uuid", "ignored=sample");
+	}
+
+	@Test
+	void summarySeesCommittedAggregateAndMaximumWithoutWaiting() throws Exception {
+		assertThat(summary(integration, 0, 0, 0).path("lastReceivedAt").isNull()).isTrue();
+		try (Connection held = jdbc.getDataSource().getConnection()) {
+			held.setAutoCommit(false);
+			try {
+				insertSummaryReport(held, "PASSED", "2000-01-02T03:04:05.123456+03:00");
+				insertSummaryReport(held, "FAILED", "2000-01-02T00:04:05.123456Z");
+				assertThat(summary(integration, 0, 0, 0).path("lastReceivedAt").isNull()).isTrue();
+				held.commit();
+				assertThat(summary(integration, 2, 1, 1).path("lastReceivedAt").asString()).isEqualTo("2000-01-02T00:04:05.123456Z");
+				insertSummaryReport(held, "PASSED", "2000-01-01T00:00:00Z");
+				held.commit();
+				var committed = summary(integration, 3, 2, 1);
+				assertThat(committed.path("lastReceivedAt").asString()).isEqualTo("2000-01-02T00:04:05.123456Z");
+				insertSummaryReport(held, "FAILED", "2000-01-03T00:00:00Z");
+				held.rollback();
+				assertThat(summary(integration, 3, 2, 1)).isEqualTo(committed);
+			} finally {
+				held.rollback();
+			}
+		}
+	}
+
+	@Test
+	void openApiDescribesOnlyImplementedBusinessOperationsAndServesSwagger() throws Exception {
+		var response = getResource("/v3/api-docs");
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/json");
+		var api = json.readTree(response.body());
+		assertThat(api.path("openapi").asString()).isEqualTo("3.0.3");
+		String root = "/internal/v1/integrations/{integrationId}";
+		var expected = Map.of("/internal/v1/reports", List.of("200", "201", "400", "415", "500", "503"),
+				root + "/reports", List.of("200", "400", "500", "503"),
+				root + "/reports/{reportId}", List.of("200", "400", "404", "500", "503"),
+				root + "/violation-groups", List.of("200", "400", "500", "503"),
+				root + "/violation-groups/{groupId}", List.of("200", "400", "404", "500", "503"),
+				root + "/summary", List.of("200", "400", "500", "503"));
+		assertThat(api.path("paths").propertyNames()).containsExactlyInAnyOrderElementsOf(expected.keySet());
+		var ids = new java.util.HashSet<String>();
+		for (var route : expected.entrySet()) {
+			var path = api.path("paths").path(route.getKey());
+			assertThat(path.size()).isEqualTo(1);
+			var operation = path.path(route.getKey().equals("/internal/v1/reports") ? "post" : "get");
+			assertThat(ids.add(operation.path("operationId").asString())).isTrue();
+			assertThat(operation.path("summary").asString()).isNotBlank();
+			assertThat(operation.path("description").asString()).isNotBlank();
+			assertThat(operation.path("tags").size()).isEqualTo(1);
+			assertThat(operation.path("responses").propertyNames()).containsExactlyInAnyOrderElementsOf(route.getValue());
+			for (String status : route.getValue()) {
+				var content = operation.path("responses").path(status).path("content");
+				String media = status.startsWith("2") ? "application/json" : "application/problem+json";
+				assertThat(content.propertyNames()).containsExactly(media);
+				assertThat(content.path(media).has("schema")).isTrue();
+				assertThat(content.path(media).path("examples").size()).isPositive();
+			}
+			for (var parameter : operation.path("parameters")) {
+				assertThat(parameter.path("name").asString()).isNotEqualTo("parameters");
+				if (parameter.path("in").asString().equals("path")) {
+					assertThat(parameter.path("required").asBoolean()).isTrue();
+					assertThat(parameter.path("schema").path("format").asString()).isEqualTo("uuid");
+				}
+			}
+		}
+		var schemas = api.path("components").path("schemas");
+		var summary = schemas.path("IntegrationSummary");
+		assertThat(summary.path("required").valueStream().map(JsonNode::asString).toList())
+				.containsExactlyInAnyOrder("integrationId", "totalReports", "passedReports", "failedReports", "lastReceivedAt");
+		assertThat(summary.path("properties").path("lastReceivedAt").path("nullable").asBoolean()).isTrue();
+		assertThat(summary.path("properties").path("lastReceivedAt").has("$ref")).isFalse();
+		assertThat(summary.path("properties").path("totalReports").path("format").asString()).isEqualTo("int64");
+		assertThat(summary.path("properties").path("totalReports").path("maximum").asLong()).isEqualTo(Long.MAX_VALUE);
+		assertThat(schemas.path("Problem").path("properties").path("errors").path("additionalProperties").path("type").asString())
+				.isEqualTo("array");
+		assertThat(schemas.path("ReportDetailsViolation").path("properties").path("groupId").path("nullable").asBoolean()).isTrue();
+		assertThat(schemas.path("ViolationGroup").path("properties").path("expectedType").path("nullable").asBoolean()).isTrue();
+		assertThat(api.path("components").has("securitySchemes")).isFalse();
+		var redirect = getResource("/swagger-ui.html");
+		assertThat(redirect.statusCode()).isBetween(301, 308);
+		String uiPath = redirect.headers().firstValue("Location").orElseThrow();
+		assertThat(getResource(uiPath).body()).contains("Swagger UI", "swagger-ui-bundle.js");
+		var config = json.readTree(getResource("/v3/api-docs/swagger-config").body());
+		assertThat(config.path("url").asString()).isEqualTo("/v3/api-docs");
+		assertThat(getResource("/swagger-ui/swagger-ui-bundle.js").statusCode()).isEqualTo(200);
+	}
+
+	private HttpResponse<String> getResource(String path) throws Exception {
+		return http.send(HttpRequest.newBuilder(endpoint.resolve(path)).timeout(Duration.ofSeconds(30)).GET().build(),
+				HttpResponse.BodyHandlers.ofString());
+	}
+
+	private void insertSummaryReport(Connection connection, String outcome, String time) throws SQLException {
+		try (var statement = connection.prepareStatement("""
+				INSERT INTO monitoring.reports (external_report_id, integration_id, contract_id, contract_version, outcome, received_at)
+				VALUES (?, ?, ?, 3, ?, ?)
+				""")) {
+			statement.setQueryTimeout(5);
+			statement.setObject(1, UUID.randomUUID());
+			statement.setObject(2, UUID.fromString(integration));
+			statement.setObject(3, UUID.fromString(CONTRACT));
+			statement.setString(4, outcome);
+			statement.setObject(5, OffsetDateTime.parse(time));
+			assertThat(statement.executeUpdate()).isEqualTo(1);
+		}
+	}
+
+	private List<List<Map<String, Object>>> summaryTables() {
+		return List.of(jdbc.queryForList("SELECT * FROM monitoring.reports ORDER BY report_row_id"),
+				jdbc.queryForList("SELECT * FROM monitoring.report_violations ORDER BY report_row_id, ordinal"),
+				jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id"));
+	}
+
+	private HttpResponse<String> getSummary(String id, String query) throws Exception {
+		return http.send(HttpRequest.newBuilder(endpoint.resolve("/internal/v1/integrations/" + id + "/summary" + query))
+				.timeout(Duration.ofSeconds(15)).GET().build(), HttpResponse.BodyHandlers.ofString());
+	}
+
+	private JsonNode summary(String id, long total, long passed, long failed) throws Exception {
+		var response = getSummary(id, "");
+		assertThat(response.statusCode()).isEqualTo(200);
+		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/json");
+		var body = json.readTree(response.body());
+		assertThat(body.size()).isEqualTo(5);
+		assertThat(body.path("integrationId").asString()).isEqualTo(id.toLowerCase(Locale.ROOT));
+		assertThat(body.path("totalReports").asLong()).isEqualTo(total);
+		assertThat(body.path("passedReports").asLong()).isEqualTo(passed);
+		assertThat(body.path("failedReports").asLong()).isEqualTo(failed);
+		return body;
+	}
+
 	private void insertGroup(Connection connection, UUID id, String field, String time) throws SQLException {
 		try (var statement = connection.prepareStatement("""
 				INSERT INTO monitoring.violation_groups
