@@ -60,7 +60,7 @@ class ReportStorageTests {
 					WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
 					""", Integer.class)).isZero();
 		}
-		assertThat(flyway(storageUrl).migrate().migrationsExecuted).isEqualTo(4);
+		assertThat(flyway(storageUrl).migrate().migrationsExecuted).isEqualTo(5);
 	}
 
 	@BeforeEach
@@ -101,7 +101,7 @@ class ReportStorageTests {
 		assertThat(jdbc.queryForList("""
 				SELECT version FROM monitoring.flyway_schema_history
 				WHERE version IS NOT NULL AND success ORDER BY installed_rank
-				""", String.class)).containsExactly("1", "2", "3", "4");
+				""", String.class)).containsExactly("1", "2", "3", "4", "5");
 		assertThat(jdbc.queryForList("""
 				SELECT table_name FROM information_schema.tables
 				WHERE table_schema = 'monitoring' ORDER BY table_name
@@ -130,7 +130,7 @@ class ReportStorageTests {
 					SELECT * FROM monitoring.flyway_schema_history WHERE version = '1'
 					""");
 			Flyway migrations = flyway(upgradeUrl);
-			assertThat(migrations.migrate().migrationsExecuted).isEqualTo(3);
+			assertThat(migrations.migrate().migrationsExecuted).isEqualTo(4);
 			assertThat(upgradeJdbc.queryForList("""
 					SELECT * FROM monitoring.flyway_schema_history WHERE version = '1'
 					""")).isEqualTo(v1History);
@@ -205,12 +205,36 @@ class ReportStorageTests {
 					VALUES (?, ?, ?, 3, 'PASSED')
 					""", UUID.randomUUID(), INTEGRATION, CONTRACT);
 			var before = upgradeJdbc.queryForList("SELECT * FROM monitoring.reports");
-			assertThat(migrations.migrate().migrationsExecuted).isEqualTo(1);
+			assertThat(migrations.migrate().migrationsExecuted).isEqualTo(2);
 			assertThat(upgradeJdbc.queryForList("SELECT * FROM monitoring.reports")).isEqualTo(before);
 			assertThat(upgradeJdbc.queryForObject("""
 					SELECT column_default FROM information_schema.columns
 					WHERE table_schema = 'monitoring' AND table_name = 'reports' AND column_name = 'received_at'
 					""", String.class)).isNull();
+			migrations.validate();
+			assertThat(migrations.migrate().migrationsExecuted).isZero();
+		}
+	}
+
+	@Test
+	void upgradesV4WithContractIndexWithoutChangingSavedReports() throws SQLException {
+		String upgradeUrl = createDatabase();
+		Flyway migrations = flyway(upgradeUrl);
+		assertThat(Flyway.configure().configuration(migrations.getConfiguration()).target("4").load()
+				.migrate().migrationsExecuted).isEqualTo(4);
+		try (Connection upgrade = open(upgradeUrl)) {
+			var upgradeJdbc = jdbc(upgrade);
+			upgradeJdbc.update("""
+					INSERT INTO monitoring.reports
+					(external_report_id, integration_id, contract_id, contract_version, outcome, received_at)
+					VALUES (?, ?, ?, 3, 'PASSED', ?)
+					""", UUID.randomUUID(), INTEGRATION, CONTRACT, RECEIVED_AT);
+			var before = upgradeJdbc.queryForList("SELECT * FROM monitoring.reports");
+			assertThat(migrations.migrate().migrationsExecuted).isEqualTo(1);
+			assertThat(upgradeJdbc.queryForList("SELECT * FROM monitoring.reports")).isEqualTo(before);
+			assertThat(upgradeJdbc.queryForList("""
+					SELECT indexname FROM pg_indexes WHERE schemaname = 'monitoring' AND tablename = 'reports'
+					""", String.class)).contains("reports_integration_history_idx", "reports_integration_contract_history_idx");
 			migrations.validate();
 			assertThat(migrations.migrate().migrationsExecuted).isZero();
 		}

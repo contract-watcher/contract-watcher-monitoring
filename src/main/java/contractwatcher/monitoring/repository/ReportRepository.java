@@ -5,6 +5,7 @@ import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -129,6 +130,11 @@ public class ReportRepository {
 		StringBuilder sql = new StringBuilder("r.integration_id = ?");
 		List<Object> values = new ArrayList<>();
 		values.add(query.integrationId());
+		if (!query.contractIds().isEmpty()) {
+			sql.append(" AND r.contract_id IN (")
+					.append(String.join(", ", Collections.nCopies(query.contractIds().size(), "?"))).append(")");
+			values.addAll(query.contractIds());
+		}
 		if (query.from() != null) {
 			sql.append(" AND r.received_at >= ?");
 			values.add(query.from().atOffset(ZoneOffset.UTC));
