@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -39,12 +40,34 @@ final class ReportHistoryParameters {
 			invalid(errors, "to", "Верхняя граница должна быть позже нижней.");
 		}
 		String outcome = outcome(single(parameters, "status", errors), errors);
+		List<UUID> contractIds = contracts(parameters, errors);
 		int offset = integer(single(parameters, "offset", errors), "offset", 0, 0, Integer.MAX_VALUE, errors);
 		int limit = integer(single(parameters, "limit", errors), "limit", 20, 1, 100, errors);
 		if (!errors.isEmpty()) {
 			throw new ReportHistoryRequestException(errors);
 		}
-		return new ReportHistoryQuery(integration, from, to, outcome, offset, limit);
+		return new ReportHistoryQuery(integration, from, to, outcome, contractIds, offset, limit);
+	}
+
+	private static List<UUID> contracts(MultiValueMap<String, String> parameters,
+			Map<String, List<String>> errors) {
+		List<String> values = parameters.get("contractId");
+		if (values == null) {
+			return List.of();
+		}
+		if (values.isEmpty() || values.size() > 50) {
+			invalid(errors, "contractId", "Требуется от 1 до 50 вхождений contractId до удаления повторов.");
+			return List.of();
+		}
+		var ids = new LinkedHashSet<UUID>();
+		for (String value : values) {
+			if (value == null || !UUID_FORMAT.matcher(value).matches()) {
+				invalid(errors, "contractId", "Каждое значение должно быть UUID в стандартной строковой записи.");
+				return List.of();
+			}
+			ids.add(UUID.fromString(value));
+		}
+		return List.copyOf(ids);
 	}
 
 	private static String single(MultiValueMap<String, String> parameters, String name,

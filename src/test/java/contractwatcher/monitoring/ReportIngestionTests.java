@@ -660,8 +660,10 @@ class ReportIngestionTests {
 		assertThat(groups()).isEqualTo(beforeGroups);
 	}
 
-	@Test
-	void historyKeepsItemsAndTotalInOneSnapshotDuringConcurrentCommit() throws Exception {
+	@ParameterizedTest
+	@ValueSource(booleans = {false, true})
+	void historyKeepsItemsAndTotalInOneSnapshotDuringConcurrentCommit(boolean filterContracts) throws Exception {
+		String query = filterContracts ? "?contractId=" + CONTRACT : "";
 		String previous = UUID.randomUUID().toString();
 		String committed = UUID.randomUUID().toString();
 		storeHistoryFixture(previous, "Passed", "", "1999-01-01T00:00:00Z");
@@ -673,18 +675,103 @@ class ReportIngestionTests {
 					statement.execute("LOCK TABLE monitoring.report_violations IN ACCESS EXCLUSIVE MODE");
 				}
 				int blocker = backendPid(held);
-				Future<HttpResponse<String>> pending = executor.submit(() -> getHistory(integration, ""));
+				Future<HttpResponse<String>> pending = executor.submit(() -> getHistory(integration, query));
 				awaitBlockedHistory(blocker);
 				insertHeldReport(held, committed);
 				held.commit();
 				assertHistoryIds(page(pending.get(10, TimeUnit.SECONDS), 1, 0, 20), previous);
-				JsonNode next = history("", 2, 0, 20);
+				JsonNode next = history(query, 2, 0, 20);
 				assertHistoryIds(next, committed, previous);
 				assertThat(next.path("items").get(0).path("violationCount").asLong()).isEqualTo(1);
 			} finally {
 				held.rollback();
 			}
 		}
+	}
+
+	@Test
+	void historyFiltersContractsAcrossVersionsBeforePagesAndCombinesIndependentFilters() throws Exception {
+		String a = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+		String c = UUID.randomUUID().toString();
+		String foreign = UUID.randomUUID().toString();
+		String a1 = UUID.randomUUID().toString();
+		String a3 = UUID.randomUUID().toString();
+		String c1 = UUID.randomUUID().toString();
+		String start = "2026-10-13T00:00:00.123456Z";
+		String end = "2026-10-14T00:00:00Z";
+		assertThat(post(request(a1, "Passed", "", start).replace(CONTRACT, a)
+				.replace("\"contractVersion\":3", "\"contractVersion\":1"), "application/json").statusCode()).isEqualTo(201);
+		String failed = request(a3, "Failed", MISSING + "," + MISMATCH + "," + MISMATCH, end).replace(CONTRACT, a);
+		assertThat(post(failed, "application/json").statusCode()).isEqualTo(201);
+		assertThat(post(request(c1, "Failed", MISSING, end).replace(CONTRACT, c)
+				.replace("\"contractVersion\":3", "\"contractVersion\":1"), "application/json").statusCode()).isEqualTo(201);
+		for (int i = 0; i < 25; i++) {
+			assertThat(post(request(UUID.randomUUID().toString(), "Passed", "", "2026-10-15T00:00:00Z"),
+					"application/json").statusCode()).isEqualTo(201);
+		}
+		String other = UUID.randomUUID().toString();
+		for (String contract : List.of(a, foreign)) {
+			assertThat(post(request(UUID.randomUUID().toString(), "Passed", "", "2026-10-16T00:00:00Z")
+					.replace(CONTRACT, contract).replace(integration, other), "application/json").statusCode()).isEqualTo(201);
+		}
+		var before = summaryTables();
+		String selected = "?contractId=" + a + "&contractId=" + c;
+		assertThat(history("", 28, 0, 20).path("items").size()).isEqualTo(20);
+		JsonNode versions = history("?contractId=" + a, 2, 0, 20);
+		assertHistoryIds(versions, a3, a1);
+		assertThat(versions.path("items").get(0).path("contractVersion").asInt()).isEqualTo(3);
+		assertThat(versions.path("items").get(1).path("contractVersion").asInt()).isEqualTo(1);
+		assertThat(versions.path("items").get(0).path("violationCount").asLong()).isEqualTo(3);
+		assertThat(versions.path("items").get(1).path("receivedAt").asString()).isEqualTo(start);
+		assertHistoryIds(history(selected, 3, 0, 20), c1, a3, a1);
+		assertHistoryIds(history(selected + "&contractId=" + a.toUpperCase(Locale.ROOT) + "&ignored=value", 3, 0, 20), c1, a3, a1);
+		assertHistoryIds(history(selected + "&limit=1", 3, 0, 1), c1);
+		assertHistoryIds(history(selected + "&limit=1&offset=1", 3, 1, 1), a3);
+		assertHistoryIds(history(selected + "&limit=1&offset=2", 3, 2, 1), a1);
+		assertHistoryIds(history(selected + "&offset=3", 3, 3, 20));
+		assertHistoryIds(history(selected + "&status=Passed", 1, 0, 20), a1);
+		assertHistoryIds(history(selected + "&from=" + start + "&to=" + end, 1, 0, 20), a1);
+		assertHistoryIds(history(selected + "&from=" + end + "&status=Failed", 2, 0, 20), c1, a3);
+		assertHistoryIds(history(selected + "&to=" + end + "&status=Failed", 0, 0, 20));
+		assertHistoryIds(history(selected + "&from=" + start + "&to=2026-10-15T00:00:00Z&status=Failed&limit=1&offset=1", 2, 1, 1), a3);
+		String absent = UUID.randomUUID().toString();
+		assertHistoryIds(history("?contractId=" + absent + "&contractId=" + foreign, 0, 0, 20));
+		assertHistoryIds(history(selected + "&contractId=" + absent + "&contractId=" + foreign, 3, 0, 20), c1, a3, a1);
+		assertHistoryIds(page(getHistory(UUID.randomUUID().toString(), selected), 0, 0, 20));
+		assertThat(post(failed, "application/json").statusCode()).isEqualTo(200);
+		assertHistoryIds(history(selected, 3, 0, 20), c1, a3, a1);
+		assertThat(summaryTables()).isEqualTo(before);
+	}
+
+	@Test
+	void historyValidatesRepeatedContractIdsWithoutWritingOrEchoingValues(CapturedOutput output) throws Exception {
+		String id = UUID.randomUUID().toString();
+		assertThat(post(request(id, "Failed", MISSING), "application/json").statusCode()).isEqualTo(201);
+		var before = summaryTables();
+		String fiftyRepeated = "?" + String.join("&", java.util.Collections.nCopies(50, "contractId=" + CONTRACT));
+		assertHistoryIds(history(fiftyRepeated, 1, 0, 20), id);
+		List<String> distinct = new ArrayList<>();
+		distinct.add("contractId=" + CONTRACT);
+		for (int i = 1; i < 50; i++) {
+			distinct.add("contractId=" + UUID.randomUUID());
+		}
+		assertHistoryIds(history("?" + String.join("&", distinct), 1, 0, 20), id);
+		for (String query : List.of("?contractId", "?contractId=", "?contractId=null", "?contractId=%5B%5D",
+				"?contractId=private-contract-marker", "?contractId=1-1-1-1-1", "?contractId=%20" + CONTRACT,
+				"?contractId=" + CONTRACT + "%20", "?contractId=" + CONTRACT + "," + CONTRACT,
+				"?contractId=" + CONTRACT + "&contractId=", "?contractId=" + CONTRACT + "&contractId=private-contract-marker",
+				fiftyRepeated + "&contractId=" + CONTRACT, "?" + String.join("&", distinct) + "&contractId=" + UUID.randomUUID())) {
+			var problem = assertProblem(getHistory(integration, query), 400, "INVALID_REQUEST");
+			assertThat(problem.path("errors").propertyNames()).containsExactly("contractId");
+			assertThat(problem.path("errors").path("contractId").size()).isEqualTo(1);
+			assertThat(problem.toString()).doesNotContain("private-contract-marker");
+		}
+		for (String parameter : List.of("status=Failed", "from=2026-10-13T00:00:00Z", "limit=1")) {
+			var problem = assertProblem(getHistory(integration, "?contractId=" + CONTRACT + "&" + parameter + "&" + parameter), 400, "INVALID_REQUEST");
+			assertThat(problem.path("errors").has(parameter.substring(0, parameter.indexOf('=')))).isTrue();
+		}
+		assertThat(summaryTables()).isEqualTo(before);
+		assertThat(output.getAll()).doesNotContain("private-contract-marker");
 	}
 
 	@Test
@@ -1319,6 +1406,22 @@ class ReportIngestionTests {
 			}
 		}
 		var schemas = api.path("components").path("schemas");
+		var history = api.path("paths").path(root + "/reports").path("get");
+		var contractId = history.path("parameters").valueStream()
+				.filter(parameter -> parameter.path("name").asString().equals("contractId")).findFirst().orElseThrow();
+		assertThat(contractId.path("in").asString()).isEqualTo("query");
+		assertThat(contractId.path("style").asString()).isEqualTo("form");
+		assertThat(contractId.path("explode").asBoolean()).isTrue();
+		assertThat(contractId.path("required").asBoolean()).isFalse();
+		assertThat(contractId.path("schema").path("type").asString()).isEqualTo("array");
+		assertThat(contractId.path("schema").path("maxItems").asInt()).isEqualTo(50);
+		assertThat(contractId.path("schema").path("minItems").asInt()).isEqualTo(1);
+		assertThat(contractId.path("schema").path("uniqueItems").asBoolean()).isFalse();
+		assertThat(contractId.path("schema").path("items").path("format").asString()).isEqualTo("uuid");
+		var contractError = history.path("responses").path("400").path("content").path("application/problem+json")
+				.path("examples").path("invalidContractId").path("value");
+		assertThat(contractError.path("code").asString()).isEqualTo("INVALID_REQUEST");
+		assertThat(contractError.path("errors").has("contractId")).isTrue();
 		var report = schemas.path("ValidationReport");
 		assertThat(report.path("required").valueStream().map(JsonNode::asString).toList()).contains("timestamp");
 		var timestamp = report.path("properties").path("timestamp");

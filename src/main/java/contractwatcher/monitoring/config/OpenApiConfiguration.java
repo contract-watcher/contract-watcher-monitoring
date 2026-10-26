@@ -130,6 +130,14 @@ class OpenApiConfiguration {
 					"UNSUPPORTED_MEDIA_TYPE", "Требуется Content-Type application/json.", instance, Map.of()));
 		}
 		operation.getResponses().addApiResponse("400", invalid);
+		if ("getReportHistory".equals(operation.getOperationId())) {
+			invalid.getContent().get("application/problem+json").addExamples("invalidContractId", example(
+					HttpStatus.BAD_REQUEST, "INVALID_REQUEST", details.invalid(), instance,
+					Map.of("contractId", List.of("Каждое значение должно быть UUID в стандартной строковой записи."))));
+			invalid.getContent().get("application/problem+json").addExamples("tooManyContractIds", example(
+					HttpStatus.BAD_REQUEST, "INVALID_REQUEST", details.invalid(), instance,
+					Map.of("contractId", List.of("Требуется от 1 до 50 вхождений contractId до удаления повторов."))));
+		}
 		operation.getResponses().addApiResponse("500", problem(HttpStatus.INTERNAL_SERVER_ERROR,
 				"INTERNAL_ERROR", details.failure(), instance, Map.of()));
 		operation.getResponses().addApiResponse("503", problem(HttpStatus.SERVICE_UNAVAILABLE,
