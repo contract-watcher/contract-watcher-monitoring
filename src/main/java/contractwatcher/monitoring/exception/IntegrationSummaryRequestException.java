@@ -8,7 +8,8 @@ public final class IntegrationSummaryRequestException extends RuntimeException {
 	private final Map<String, List<String>> errors;
 
 	public IntegrationSummaryRequestException(Map<String, List<String>> errors) {
-		super("Некорректный идентификатор интеграции.");
+		super(errors.size() == 1 && errors.containsKey("integrationId")
+				? "Некорректный идентификатор интеграции." : "Некорректные параметры сводки.");
 		this.errors = Map.copyOf(errors);
 	}
 
