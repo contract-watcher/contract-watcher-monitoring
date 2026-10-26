@@ -17,6 +17,7 @@ import contractwatcher.monitoring.model.ReportToStore;
 import contractwatcher.monitoring.model.ReportDetailsEntry;
 import contractwatcher.monitoring.model.ReportHistoryEntry;
 import contractwatcher.monitoring.model.ReportHistoryQuery;
+import contractwatcher.monitoring.model.IntegrationSummaryQuery;
 import contractwatcher.monitoring.model.StoredReport;
 import contractwatcher.monitoring.dto.IntegrationSummary;
 
@@ -58,18 +59,29 @@ public class ReportRepository {
 				Long.class, filter.values().toArray());
 	}
 
-	public IntegrationSummary summary(UUID integrationId) {
+	public IntegrationSummary summary(IntegrationSummaryQuery query) {
+		StringBuilder filter = new StringBuilder("integration_id = ?");
+		List<Object> values = new ArrayList<>();
+		values.add(query.integrationId());
+		if (query.from() != null) {
+			filter.append(" AND received_at >= ?");
+			values.add(query.from().atOffset(ZoneOffset.UTC));
+		}
+		if (query.to() != null) {
+			filter.append(" AND received_at < ?");
+			values.add(query.to().atOffset(ZoneOffset.UTC));
+		}
 		return jdbc.queryForObject("""
 				SELECT count(*) AS total_reports,
 				       count(*) FILTER (WHERE outcome = 'PASSED') AS passed_reports,
 				       count(*) FILTER (WHERE outcome = 'FAILED') AS failed_reports,
 				       max(received_at) AS last_received_at
-				FROM monitoring.reports WHERE integration_id = ?
-				""", (row, index) -> {
+				FROM monitoring.reports WHERE %s
+				""".formatted(filter), (row, index) -> {
 			var lastReceivedAt = row.getObject("last_received_at", OffsetDateTime.class);
-			return new IntegrationSummary(integrationId, row.getLong("total_reports"), row.getLong("passed_reports"),
+			return new IntegrationSummary(query.integrationId(), row.getLong("total_reports"), row.getLong("passed_reports"),
 					row.getLong("failed_reports"), lastReceivedAt == null ? null : lastReceivedAt.toInstant());
-		}, integrationId);
+		}, values.toArray());
 	}
 
 	public Optional<ReportDetailsEntry> findDetails(UUID integrationId, UUID reportId) {

@@ -57,6 +57,10 @@ public final class ApiExamples {
 	public static final String EMPTY_SUMMARY = """
 			{"integrationId":"22222222-2222-4222-8222-222222222222","totalReports":0,"passedReports":0,"failedReports":0,"lastReceivedAt":null}
 			""";
+	public static final String PERIOD_SUMMARY = """
+			{"integrationId":"22222222-2222-4222-8222-222222222222","totalReports":3,"passedReports":2,"failedReports":1,
+			 "lastReceivedAt":"2026-10-26T20:59:59.999999Z"}
+			""";
 
 	private ApiExamples() {
 	}

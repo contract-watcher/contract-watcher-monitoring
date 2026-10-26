@@ -130,6 +130,12 @@ class OpenApiConfiguration {
 					"UNSUPPORTED_MEDIA_TYPE", "Требуется Content-Type application/json.", instance, Map.of()));
 		}
 		operation.getResponses().addApiResponse("400", invalid);
+		if ("getIntegrationSummary".equals(operation.getOperationId())) {
+			invalid.setDescription("INVALID_REQUEST: UUID или параметры периода. Ошибка одного UUID сохраняет прежний detail.");
+			invalid.getContent().get("application/problem+json").addExamples("invalidPeriod", example(
+					HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Некорректные параметры сводки.", instance,
+					Map.of("to", List.of("Верхняя граница должна быть позже нижней."))));
+		}
 		if ("getReportHistory".equals(operation.getOperationId())) {
 			invalid.getContent().get("application/problem+json").addExamples("invalidContractId", example(
 					HttpStatus.BAD_REQUEST, "INVALID_REQUEST", details.invalid(), instance,

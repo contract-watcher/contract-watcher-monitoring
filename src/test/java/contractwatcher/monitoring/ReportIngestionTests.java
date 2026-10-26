@@ -9,7 +9,9 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -32,6 +34,7 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
@@ -98,6 +101,8 @@ class ReportIngestionTests {
 				"--spring.datasource.username=" + user, "--spring.datasource.password=" + password,
 				"--logging.level.com.zaxxer.hikari.HikariDataSource=WARN",
 				"--logging.level.com.zaxxer.hikari.pool.HikariPool=WARN", "--logging.level.org.springframework=WARN",
+				"--spring.datasource.hikari.connection-init-sql=SET TIME ZONE '"
+						+ System.getProperty("monitoring.test.database.timezone", "UTC") + "'",
 				"--spring.main.banner-mode=off");
 		json = application.getBean(JsonMapper.class);
 		endpoint = URI.create("http://127.0.0.1:" + application.getWebServer().getPort() + "/internal/v1/reports");
@@ -1366,6 +1371,176 @@ class ReportIngestionTests {
 	}
 
 	@Test
+	void summaryPeriodUsesMicrosecondBoundsAndMatchesHistoryTotals() throws Exception {
+		String start = "2026-10-26T00:00:00.123456Z";
+		String end = "2026-10-27T00:00:00Z";
+		storeHistoryFixture(UUID.randomUUID().toString(), "Failed", MISSING, "2026-10-26T00:00:00.123455Z");
+		storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", start);
+		String failed = request(UUID.randomUUID().toString(), "Failed", MISSING + "," + MISMATCH + "," + MISMATCH,
+				"2026-10-26T12:00:00Z").replace(CONTRACT, UUID.randomUUID().toString())
+				.replace("\"contractVersion\":3", "\"contractVersion\":4");
+		assertThat(post(failed, "application/json").statusCode()).isEqualTo(201);
+		storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", "2026-10-26T23:59:59.999999Z");
+		storeHistoryFixture(UUID.randomUUID().toString(), "Failed", MISSING, end);
+		storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", "2026-10-27T00:00:00.000001Z");
+		assertThat(post(request(UUID.randomUUID().toString(), "Failed", MISSING, start)
+				.replace(integration, UUID.randomUUID().toString()), "application/json").statusCode()).isEqualTo(201);
+		var before = summaryTables();
+		String period = "?from=" + start + "&to=" + end;
+		var selected = summary(integration, period, 3, 2, 1);
+		assertThat(selected.path("lastReceivedAt").asString()).isEqualTo("2026-10-26T23:59:59.999999Z");
+		assertSummaryMatchesHistory(period, selected);
+		assertSummaryMatchesHistory("?from=" + start, summary(integration, "?from=" + start, 5, 3, 2));
+		assertSummaryMatchesHistory("?to=" + end, summary(integration, "?to=" + end, 4, 2, 2));
+		assertSummaryMatchesHistory("", summary(integration, 6, 3, 3));
+		assertThat(json.readTree(getSummary(integration, period + "&contractId=invalid&status=invalid&limit=bad&ignored=x").body()))
+				.isEqualTo(selected);
+		for (String query : List.of("?to=2026-01-01T00:00:00Z", "?from=2027-01-01T00:00:00Z",
+				"?from=2026-10-28T00:00:00Z&to=2026-10-29T00:00:00Z")) {
+			assertThat(summary(integration, query, 0, 0, 0).path("lastReceivedAt").isNull()).isTrue();
+		}
+		assertThat(summary(UUID.randomUUID().toString(), period, 0, 0, 0).path("lastReceivedAt").isNull()).isTrue();
+		assertThat(summaryTables()).isEqualTo(before);
+	}
+
+	@ParameterizedTest
+	@CsvSource({
+			"UTC,2026-10-26,2026-10-26,2026-10-26T00:00:00Z,2026-10-27T00:00:00Z,24",
+			"Europe/Moscow,2026-10-26,2026-10-26,2026-10-25T21:00:00Z,2026-10-26T21:00:00Z,24",
+			"Europe/Moscow,2026-10-24,2026-10-26,2026-10-23T21:00:00Z,2026-10-26T21:00:00Z,72",
+			"Europe/Berlin,2026-03-29,2026-03-29,2026-03-28T23:00:00Z,2026-03-29T22:00:00Z,23",
+			"Europe/Berlin,2026-10-25,2026-10-25,2026-10-24T22:00:00Z,2026-10-25T23:00:00Z,25"})
+	void summaryAcceptsConsumerCalendarExamplesIncludingLastDayAndDst(String zone, String first, String last,
+			String expectedFrom, String expectedTo, long hours) throws Exception {
+		ZoneId browserZone = ZoneId.of(zone);
+		Instant from = LocalDate.parse(first).atStartOfDay(browserZone).toInstant();
+		Instant to = LocalDate.parse(last).plusDays(1).atStartOfDay(browserZone).toInstant();
+		assertThat(from).isEqualTo(Instant.parse(expectedFrom));
+		assertThat(to).isEqualTo(Instant.parse(expectedTo));
+		assertThat(Duration.between(from, to).toHours()).isEqualTo(hours);
+		for (Instant time : List.of(from.minusNanos(1000), from, to.minusNanos(1000), to, to.plusNanos(1000))) {
+			storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", time.toString());
+		}
+		long extra = 0;
+		if (hours == 25) {
+			Instant firstHour = Instant.parse("2026-10-25T00:30:00Z");
+			Instant repeatedHour = Instant.parse("2026-10-25T01:30:00Z");
+			assertThat(firstHour.atZone(browserZone).toLocalDateTime()).isEqualTo(repeatedHour.atZone(browserZone).toLocalDateTime());
+			storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", firstHour.toString());
+			storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", repeatedHour.toString());
+			extra = 2;
+		}
+		String query = "?from=" + from + "&to=" + to;
+		var selected = summary(integration, query, 2 + extra, 2 + extra, 0);
+		assertThat(Instant.parse(selected.path("lastReceivedAt").asString())).isEqualTo(to.minusNanos(1000));
+		assertSummaryMatchesHistory(query, selected);
+		assertThat(application.getBean(JdbcTemplate.class).queryForObject("SHOW TimeZone", String.class))
+				.isEqualTo(System.getProperty("monitoring.test.database.timezone", "UTC"));
+	}
+
+	@Test
+	void summaryUsesProvidedTodayBoundsAndStoredSdkTimeWithoutNowCutoff() throws Exception {
+		Instant fixedNow = Instant.parse("2026-10-25T21:30:00Z");
+		storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", "2026-10-25T21:15:00Z");
+		storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", "2026-10-25T20:59:59.999999Z");
+		storeHistoryFixture(UUID.randomUUID().toString(), "Failed", MISSING, "9999-12-30T23:59:59.999999Z");
+		for (String zone : List.of("UTC", "Europe/Moscow")) {
+			ZoneId browserZone = ZoneId.of(zone);
+			LocalDate today = fixedNow.atZone(browserZone).toLocalDate();
+			String query = "?from=" + today.atStartOfDay(browserZone).toInstant()
+					+ "&to=" + today.plusDays(1).atStartOfDay(browserZone).toInstant();
+			var selected = summary(integration, query, zone.equals("UTC") ? 2 : 1, zone.equals("UTC") ? 2 : 1, 0);
+			assertSummaryMatchesHistory(query, selected);
+		}
+		assertThat(summary(integration, "?from=9999-12-30T00:00:00Z&to=9999-12-31T00:00:00Z", 1, 0, 1)
+				.path("lastReceivedAt").asString()).isEqualTo("9999-12-30T23:59:59.999999Z");
+	}
+
+	@Test
+	void summaryPeriodDuplicateKeepsFirstDayEvenWithConcurrentDifferentTimestamp() throws Exception {
+		String id = UUID.randomUUID().toString();
+		String original = request(id, "Failed", MISMATCH + "," + MISMATCH + "," + MISSING, "2026-10-25T23:59:59.999999Z");
+		var accepted = confirmation(post(original, "application/json"), 201, integration, id);
+		String yesterday = "?from=2026-10-25T00:00:00Z&to=2026-10-26T00:00:00Z";
+		String today = "?from=2026-10-26T00:00:00Z&to=2026-10-27T00:00:00Z";
+		var saved = summary(integration, yesterday, 1, 0, 1);
+		var before = summaryTables();
+		try (var executor = Executors.newFixedThreadPool(4)) {
+			var duplicates = new ArrayList<Future<HttpResponse<String>>>();
+			for (int i = 0; i < 4; i++) {
+				duplicates.add(executor.submit(() -> post(request(id, "Passed", "", "2026-10-26T12:00:00Z"), "application/json")));
+			}
+			for (var duplicate : duplicates) {
+				assertDuplicate(duplicate.get(10, TimeUnit.SECONDS), accepted);
+			}
+		}
+		assertThat(summary(integration, yesterday, 1, 0, 1)).isEqualTo(saved);
+		assertThat(summary(integration, today, 0, 0, 0).path("lastReceivedAt").isNull()).isTrue();
+		assertThat(summaryTables()).isEqualTo(before);
+	}
+
+	@Test
+	void summaryPeriodReadsCommittedCountersAndMaximumTogether() throws Exception {
+		String period = "?from=2000-01-02T00:00:00Z&to=2000-01-03T00:00:00Z";
+		try (Connection held = jdbc.getDataSource().getConnection()) {
+			held.setAutoCommit(false);
+			try {
+				insertSummaryReport(held, "PASSED", "2000-01-03T00:00:00Z");
+				held.commit();
+				insertSummaryReport(held, "FAILED", "2000-01-02T12:00:00.123456Z");
+				insertSummaryReport(held, "PASSED", "2000-01-02T00:00:00Z");
+				insertSummaryReport(held, "PASSED", "2000-01-02T12:00:00.123456Z");
+				assertThat(summary(integration, period, 0, 0, 0).path("lastReceivedAt").isNull()).isTrue();
+				held.commit();
+				var committed = summary(integration, period, 3, 2, 1);
+				assertThat(committed.path("lastReceivedAt").asString()).isEqualTo("2000-01-02T12:00:00.123456Z");
+				insertSummaryReport(held, "FAILED", "2000-01-02T23:59:59.999999Z");
+				assertThat(summary(integration, period, 3, 2, 1)).isEqualTo(committed);
+				held.rollback();
+				assertThat(summary(integration, period, 3, 2, 1)).isEqualTo(committed);
+				assertSummaryMatchesHistory(period, committed);
+			} finally {
+				held.rollback();
+			}
+		}
+	}
+
+	@Test
+	void summaryAndHistoryRejectSamePeriodOverHttpWithoutWriting(CapturedOutput output) throws Exception {
+		storeHistoryFixture(UUID.randomUUID().toString(), "Passed", "", "2028-02-29T00:00:00.1Z");
+		String leapDay = "?from=2028-02-29T00:00:00.1Z&to=2028-02-29T00:00:00.100001Z";
+		assertSummaryMatchesHistory(leapDay, summary(integration, leapDay, 1, 1, 0));
+		var before = summaryTables();
+		for (String query : List.of("?from", "?from=", "?to=%20", "?from=private-period-marker",
+				"?from=2026-02-30T00:00:00Z", "?to=2026-02-29T00:00:00Z", "?from=0000-01-01T00:00:00Z",
+				"?from=10000-01-01T00:00:00Z", "?to=2026-10-26T24:00:00Z", "?to=2026-10-26T00:00:60Z",
+				"?from=2026-10-26", "?from=2026-10-26T00:00:00", "?from=2026-10-26T00:00:00z",
+				"?to=2026-10-26T00:00:00%2B00:00", "?from=2026-10-26T00:00:00.1234567Z",
+				"?from=2026-10-26T00:00:00Z&from=2026-10-26T00:00:00Z",
+				"?from=2026-10-26T00:00:00Z&to=2026-10-26T00:00:00Z",
+				"?from=2026-10-27T00:00:00Z&to=2026-10-26T00:00:00Z")) {
+			var problem = assertProblem(getSummary(integration, query), 400, "INVALID_REQUEST");
+			assertThat(problem.path("detail").asString()).isEqualTo("Некорректные параметры сводки.");
+			assertThat(problem.path("errors")).isEqualTo(assertProblem(getHistory(integration, query), 400, "INVALID_REQUEST").path("errors"));
+			assertThat(problem.path("instance").asString()).doesNotContain("?");
+			assertThat(problem.toString()).doesNotContain("private-period-marker");
+		}
+		assertThat(summaryTables()).isEqualTo(before);
+		assertThat(output.getAll()).doesNotContain("private-period-marker");
+	}
+
+	private void assertSummaryMatchesHistory(String period, JsonNode selected) throws Exception {
+		String separator = period.isEmpty() ? "?" : "&";
+		history(period + separator + "limit=1&offset=2147483647", selected.path("totalReports").asLong(), Integer.MAX_VALUE, 1);
+		history(period + separator + "status=Passed&limit=1", selected.path("passedReports").asLong(), 0, 1);
+		history(period + separator + "status=Failed&limit=1", selected.path("failedReports").asLong(), 0, 1);
+		var latest = history(period + separator + "limit=1", selected.path("totalReports").asLong(), 0, 1);
+		if (selected.path("totalReports").asLong() > 0) {
+			assertThat(latest.path("items").get(0).path("receivedAt")).isEqualTo(selected.path("lastReceivedAt"));
+		}
+	}
+
+	@Test
 	void openApiDescribesOnlyImplementedBusinessOperationsAndServesSwagger() throws Exception {
 		var response = getResource("/v3/api-docs");
 		assertThat(response.statusCode()).isEqualTo(200);
@@ -1430,6 +1605,24 @@ class ReportIngestionTests {
 		assertThat(timestamp.path("pattern").asString()).isEqualTo(contractwatcher.monitoring.dto.ApiSchema.REPORT_TIMESTAMP_PATTERN);
 		assertThat(timestamp.path("nullable").asBoolean()).isFalse();
 		var summary = schemas.path("IntegrationSummary");
+		var summaryOperation = api.path("paths").path(root + "/summary").path("get");
+		assertThat(summaryOperation.path("parameters").valueStream().filter(p -> p.path("in").asString().equals("query"))
+				.map(p -> p.path("name").asString()).toList()).containsExactlyInAnyOrder("from", "to");
+		for (var parameter : summaryOperation.path("parameters")) {
+			if (parameter.path("in").asString().equals("query")) {
+				assertThat(parameter.path("required").asBoolean()).isFalse();
+				assertThat(parameter.path("schema").path("pattern").asString())
+						.isEqualTo(contractwatcher.monitoring.dto.ApiSchema.UTC_PATTERN);
+				assertThat(parameter.path("schema").path("maxLength").asInt()).isEqualTo(27);
+			}
+		}
+		var periodError = summaryOperation.path("responses").path("400").path("content").path("application/problem+json")
+				.path("examples").path("invalidPeriod").path("value");
+		assertThat(periodError.path("detail").asString()).isEqualTo("Некорректные параметры сводки.");
+		assertThat(periodError.path("errors").has("to")).isTrue();
+		assertThat(summaryOperation.path("responses").path("200").path("content").path("application/json")
+				.path("examples").path("selectedDay").path("value").path("lastReceivedAt").asString())
+				.isEqualTo("2026-10-26T20:59:59.999999Z");
 		assertThat(summary.path("required").valueStream().map(JsonNode::asString).toList())
 				.containsExactlyInAnyOrder("integrationId", "totalReports", "passedReports", "failedReports", "lastReceivedAt");
 		assertThat(summary.path("properties").path("lastReceivedAt").path("nullable").asBoolean()).isTrue();
@@ -1531,7 +1724,11 @@ class ReportIngestionTests {
 	}
 
 	private JsonNode summary(String id, long total, long passed, long failed) throws Exception {
-		var response = getSummary(id, "");
+		return summary(id, "", total, passed, failed);
+	}
+
+	private JsonNode summary(String id, String query, long total, long passed, long failed) throws Exception {
+		var response = getSummary(id, query);
 		assertThat(response.statusCode()).isEqualTo(200);
 		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/json");
 		var body = json.readTree(response.body());
