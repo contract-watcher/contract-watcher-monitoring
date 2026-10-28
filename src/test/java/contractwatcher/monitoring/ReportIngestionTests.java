@@ -1549,6 +1549,7 @@ class ReportIngestionTests {
 		assertThat(api.path("openapi").asString()).isEqualTo("3.0.3");
 		String root = "/internal/v1/integrations/{integrationId}";
 		var expected = Map.of("/internal/v1/reports", List.of("200", "201", "400", "415", "500", "503"),
+				"/internal/v1/integration-summaries/query", List.of("200", "400", "413", "415", "500", "503"),
 				root + "/reports", List.of("200", "400", "500", "503"),
 				root + "/reports/{reportId}", List.of("200", "400", "404", "500", "503"),
 				root + "/violation-groups", List.of("200", "400", "500", "503"),
@@ -1559,7 +1560,8 @@ class ReportIngestionTests {
 		for (var route : expected.entrySet()) {
 			var path = api.path("paths").path(route.getKey());
 			assertThat(path.size()).isEqualTo(1);
-			var operation = path.path(route.getKey().equals("/internal/v1/reports") ? "post" : "get");
+			var operation = path.path(route.getKey().equals("/internal/v1/reports")
+					|| route.getKey().equals("/internal/v1/integration-summaries/query") ? "post" : "get");
 			assertThat(ids.add(operation.path("operationId").asString())).isTrue();
 			assertThat(operation.path("summary").asString()).isNotBlank();
 			assertThat(operation.path("description").asString()).isNotBlank();

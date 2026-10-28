@@ -1,6 +1,16 @@
 package contractwatcher.monitoring.config;
 
 public final class ApiExamples {
+	public static final String PROJECT_SUMMARIES_REQUEST = """
+			{"integrationIds":["22222222-2222-4222-8222-222222222222","11111111-1111-4111-8111-111111111111"],
+			 "from":"2026-10-27T21:00:00Z","to":"2026-10-28T21:00:00Z","onlyFailed":false,"offset":0,"limit":20}
+			""";
+	public static final String PROJECT_SUMMARIES = """
+			{"items":[{"integrationId":"22222222-2222-4222-8222-222222222222","totalReports":4,"passedReports":2,"failedReports":2,
+			 "lastReceivedAt":"2026-10-28T12:00:00Z"},
+			 {"integrationId":"11111111-1111-4111-8111-111111111111","totalReports":0,"passedReports":0,"failedReports":0,"lastReceivedAt":null}],
+			 "total":2,"offset":0,"limit":20}
+			""";
 
 	public static final String REQUEST = """
 			{"integrationId":"22222222-2222-4222-8222-222222222222",

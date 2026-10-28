@@ -8,6 +8,7 @@ import contractwatcher.monitoring.exception.ViolationGroupsRequestException;
 import contractwatcher.monitoring.exception.ViolationGroupDetailsRequestException;
 import contractwatcher.monitoring.exception.ViolationGroupNotFoundException;
 import contractwatcher.monitoring.exception.IntegrationSummaryRequestException;
+import contractwatcher.monitoring.exception.SummaryBodyTooLargeException;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -35,6 +36,12 @@ import org.springframework.web.servlet.HandlerMapping;
 final class ReportExceptionHandler {
 
 	private static final Logger LOG = LoggerFactory.getLogger(ReportExceptionHandler.class);
+
+	@ExceptionHandler(SummaryBodyTooLargeException.class)
+	ResponseEntity<ProblemDetail> summaryTooLarge(HttpServletRequest request) {
+		return problem(request, HttpStatus.CONTENT_TOO_LARGE, "REQUEST_TOO_LARGE",
+				"Тело запроса превышает 524288 байт.", Map.of());
+	}
 
 	@ExceptionHandler(HttpMessageNotReadableException.class)
 	ResponseEntity<ProblemDetail> invalidRequest(HttpServletRequest request) {
@@ -86,7 +93,9 @@ final class ReportExceptionHandler {
 	@ExceptionHandler(HttpMediaTypeNotSupportedException.class)
 	ResponseEntity<ProblemDetail> unsupportedMediaType(HttpServletRequest request) {
 		return problem(request, HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE",
-				"Требуется Content-Type application/json.", Map.of());
+				ProjectSummariesController.PATH.equals(request.getRequestURI())
+						? "Требуется Content-Type application/json и несжатое тело."
+						: "Требуется Content-Type application/json.", Map.of());
 	}
 
 	@ExceptionHandler(Exception.class)
@@ -100,6 +109,9 @@ final class ReportExceptionHandler {
 	}
 
 	private String failureDetail(HttpServletRequest request) {
+		if (ProjectSummariesController.PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))) {
+			return "Не удалось прочитать сводки интеграций.";
+		}
 		if ("GET".equals(request.getMethod())) {
 			if (IntegrationSummaryController.PATH.equals(request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))) {
 				return "Не удалось прочитать сводку интеграции.";
