@@ -39,7 +39,7 @@ class OpenApiConfiguration {
 						+ "receivedAt и времена групп/сводки основаны на report.timestamp SDK; прежние имена полей сохранены. "
 						+ "Время ответа: UTC/Z, дробь до 6 знаков. Старые записи сохраняют прежнее время. Nullable-поля ответа присутствуют явно. "
 						+ "Счетчики: точные JSON-целые int64; в JavaScript выше 9007199254740991 нужен парсер без потери точности. "
-						+ "Неизвестные query-параметры игнорируются. Отдельные HTTP-запросы читают независимые снимки."))
+						+ "Прежние GET игнорируют неизвестные query; массовый POST сводок отклоняет непустой query. Отдельные HTTP-запросы читают независимые снимки."))
 				.tags(List.of(new Tag().name("Отчеты").description("Прием, история и сохраненные нарушения."),
 						new Tag().name("Группы нарушений").description("Группы и число появлений нарушений."),
 						new Tag().name("Сводка").description("Счетчики сохраненных отчетов интеграции.")));
@@ -99,7 +99,7 @@ class OpenApiConfiguration {
 				.addProperty("detail", new StringSchema())
 				.addProperty("instance", new StringSchema().format("uri-reference").description("Путь запроса без query."))
 				.addProperty("code", new StringSchema()._enum(List.of("INVALID_REQUEST", "VALIDATION_REPORT_INVALID",
-						"REPORT_NOT_FOUND", "VIOLATION_GROUP_NOT_FOUND", "UNSUPPORTED_MEDIA_TYPE", "STORAGE_UNAVAILABLE", "INTERNAL_ERROR")))
+						"REPORT_NOT_FOUND", "VIOLATION_GROUP_NOT_FOUND", "REQUEST_TOO_LARGE", "UNSUPPORTED_MEDIA_TYPE", "STORAGE_UNAVAILABLE", "INTERNAL_ERROR")))
 				.addProperty("errors", new ObjectSchema().additionalProperties(new ArraySchema().items(new StringSchema()))
 						.description("Имя поля -> массив сообщений; {} для общей ошибки."));
 	}
@@ -112,13 +112,20 @@ class OpenApiConfiguration {
 			case "getViolationGroups" -> new ErrorDetails("Некорректные параметры списка групп.", "Не удалось прочитать группы нарушений.");
 			case "getViolationGroup" -> new ErrorDetails("Некорректные идентификаторы группы нарушений.", "Не удалось прочитать группу нарушений.");
 			case "getIntegrationSummary" -> new ErrorDetails("Некорректный идентификатор интеграции.", "Не удалось прочитать сводку интеграции.");
+			case "queryIntegrationSummaries" -> new ErrorDetails("Некорректные параметры сводки.", "Не удалось прочитать сводки интеграций.");
 			default -> throw new IllegalStateException("Неизвестная документируемая операция.");
 		};
 		String instance = path.replace("{integrationId}", identifier("integrationId"))
 				.replace("{reportId}", identifier("reportId")).replace("{groupId}", identifier("groupId"));
 		boolean ingest = "ingestReport".equals(operation.getOperationId());
-		var invalidFields = ingest ? Map.<String, List<String>>of()
-				: Map.of("integrationId", List.of("Требуется UUID в стандартной строковой записи."));
+		boolean summaries = "queryIntegrationSummaries".equals(operation.getOperationId());
+		Map<String, List<String>> invalidFields;
+		if (summaries) {
+			invalidFields = Map.of("integrationIds", List.of("Требуется массив от 0 до 10000 UUID до удаления повторов."));
+		} else {
+			invalidFields = ingest ? Map.of()
+					: Map.of("integrationId", List.of("Требуется UUID в стандартной строковой записи."));
+		}
 		String invalidInstance = ingest ? instance : instance.replace(identifier("integrationId"), "not-a-uuid");
 		var invalid = problem(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", details.invalid(), invalidInstance, invalidFields);
 		if (ingest) {
@@ -130,6 +137,12 @@ class OpenApiConfiguration {
 					"UNSUPPORTED_MEDIA_TYPE", "Требуется Content-Type application/json.", instance, Map.of()));
 		}
 		operation.getResponses().addApiResponse("400", invalid);
+		if (summaries) {
+			operation.getResponses().addApiResponse("413", problem(HttpStatus.CONTENT_TOO_LARGE, "REQUEST_TOO_LARGE",
+					"Тело запроса превышает 524288 байт.", instance, Map.of()));
+			operation.getResponses().addApiResponse("415", problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE",
+					"Требуется Content-Type application/json и несжатое тело.", instance, Map.of()));
+		}
 		if ("getIntegrationSummary".equals(operation.getOperationId())) {
 			invalid.setDescription("INVALID_REQUEST: UUID или параметры периода. Ошибка одного UUID сохраняет прежний detail.");
 			invalid.getContent().get("application/problem+json").addExamples("invalidPeriod", example(
