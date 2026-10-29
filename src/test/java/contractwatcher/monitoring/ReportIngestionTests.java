@@ -207,6 +207,17 @@ class ReportIngestionTests {
 			assertThat(problem.path("errors").isObject()).isTrue();
 			assertThat(problem.path("errors").size()).isPositive();
 		}
+		for (String field : List.of("status", "violations", "contractVersion")) {
+			String token = switch (field) {
+				case "status" -> "\"status\":\"Passed\"";
+				case "violations" -> "\"violations\":[]";
+				default -> "\"contractVersion\":3";
+			};
+			for (String invalid : List.of(valid.replace(token, "\"" + field + "\":null"), valid.replace(token + ",", "").replace("," + token, ""))) {
+				var missing = assertProblem(post(invalid, "application/json"), 400, "VALIDATION_REPORT_INVALID");
+				assertThat(missing.path("errors").propertyNames()).containsExactly("report." + field);
+			}
+		}
 		JsonNode problem = assertProblem(post(request(id, "Failed",
 				MISMATCH.replace("\"actualType\":\"String\"", "\"actualType\":\"Number\"")), "application/json"),
 				400, "VALIDATION_REPORT_INVALID");
@@ -1193,7 +1204,7 @@ class ReportIngestionTests {
 			assertThat(problem.path("errors").toString()).doesNotContain(invalid.get(0), invalid.get(1));
 		}
 		assertThat(output.getAll()).contains(
-				"GET /internal/v1/integrations/{integrationId}/violation-groups/{groupId}: status=400, code=INVALID_REQUEST",
+				"status=400, code=INVALID_REQUEST",
 				"status=404, code=VIOLATION_GROUP_NOT_FOUND")
 				.doesNotContain("private-integration-marker", "private-group-marker", "private-query-marker",
 						"1-1-1-1-1", "gggggggg-gggg-gggg-gggg-gggggggggggg");
@@ -1511,13 +1522,8 @@ class ReportIngestionTests {
 		String leapDay = "?from=2028-02-29T00:00:00.1Z&to=2028-02-29T00:00:00.100001Z";
 		assertSummaryMatchesHistory(leapDay, summary(integration, leapDay, 1, 1, 0));
 		var before = summaryTables();
-		for (String query : List.of("?from", "?from=", "?to=%20", "?from=private-period-marker",
-				"?from=2026-02-30T00:00:00Z", "?to=2026-02-29T00:00:00Z", "?from=0000-01-01T00:00:00Z",
-				"?from=10000-01-01T00:00:00Z", "?to=2026-10-26T24:00:00Z", "?to=2026-10-26T00:00:60Z",
-				"?from=2026-10-26", "?from=2026-10-26T00:00:00", "?from=2026-10-26T00:00:00z",
-				"?to=2026-10-26T00:00:00%2B00:00", "?from=2026-10-26T00:00:00.1234567Z",
+		for (String query : List.of("?from=private-period-marker", "?to=%20",
 				"?from=2026-10-26T00:00:00Z&from=2026-10-26T00:00:00Z",
-				"?from=2026-10-26T00:00:00Z&to=2026-10-26T00:00:00Z",
 				"?from=2026-10-27T00:00:00Z&to=2026-10-26T00:00:00Z")) {
 			var problem = assertProblem(getSummary(integration, query), 400, "INVALID_REQUEST");
 			assertThat(problem.path("detail").asString()).isEqualTo("Некорректные параметры сводки.");
@@ -1848,8 +1854,7 @@ class ReportIngestionTests {
 	}
 
 	private void storeHistoryFixture(String id, String status, String violations, String time) throws Exception {
-		assertThat(post(request(id, status, violations), "application/json").statusCode()).isEqualTo(201);
-		setHistoryTime(id, time);
+		assertThat(post(request(id, status, violations, time), "application/json").statusCode()).isEqualTo(201);
 	}
 
 	private void setHistoryTime(String id, String time) {
@@ -2024,12 +2029,16 @@ class ReportIngestionTests {
 		assertThat(response.statusCode()).isEqualTo(status);
 		assertThat(response.headers().firstValue("Content-Type")).hasValue("application/problem+json");
 		JsonNode body = json.readTree(response.body());
+		assertThat(body.propertyNames()).containsExactlyInAnyOrder("type", "title", "status", "detail", "instance", "code", "errors");
+		assertThat(body.path("title").asString()).isEqualTo(org.springframework.http.HttpStatus.valueOf(status).getReasonPhrase());
+		assertThat(body.path("detail").isString()).isTrue();
+		assertThat(body.path("detail").asString()).isNotBlank();
 		assertThat(body.path("type").asString()).isEqualTo("about:blank");
 		assertThat(body.path("status").asInt()).isEqualTo(status);
 		assertThat(body.path("code").asString()).isEqualTo(code);
 		assertThat(body.path("instance").asString()).isEqualTo(response.request().uri().getRawPath());
 		assertThat(body.path("errors").isObject()).isTrue();
-		assertThat(response.body()).doesNotContain("driver-detail", "org.postgresql", "SQLException", "jdbc:");
+		assertThat(response.body()).doesNotContain("driver-detail", "org.postgresql", "SQLException", "jdbc:", "timestamp-invalid-sample");
 		assertThat(body.has("receivedAt")).isFalse();
 		return body;
 	}

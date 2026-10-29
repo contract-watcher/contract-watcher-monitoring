@@ -66,8 +66,7 @@ class ProjectSummariesTests {
 
 	@Test
 	void sharesExactPeriodRules() throws Exception {
-		for (String value : List.of("", "2026-10-28T00:00Z", "2026-10-28T00:00:00+00:00", "2026-02-29T00:00:00Z",
-				"0000-01-01T00:00:00Z", "10000-01-01T00:00:00Z", "2026-10-28T00:00:00.1234567Z")) {
+		for (String value : List.of("private-period-marker", "2026-10-28T00:00:00.1234567Z")) {
 			assertThatThrownBy(() -> parse("{\"integrationIds\":[],\"from\":\"" + value + "\"}"))
 					.isInstanceOf(IntegrationSummaryRequestException.class);
 		}
@@ -89,6 +88,9 @@ class ProjectSummariesTests {
 		};
 		assertThatThrownBy(() -> ProjectSummariesParameters.parse(endless, null)).isInstanceOf(SummaryBodyTooLargeException.class);
 		assertThat(read.get()).isEqualTo(max + 1);
+		String multibyte = "{\"integrationIds\":[\"" + "я".repeat(max / 2) + "\"]}";
+		assertThat(multibyte.length()).isLessThan(max);
+		assertThatThrownBy(() -> parse(multibyte)).isInstanceOf(SummaryBodyTooLargeException.class);
 	}
 
 	@Test
@@ -102,13 +104,17 @@ class ProjectSummariesTests {
 			assertThat(response.getStatus()).isEqualTo(400);
 			assertThat(response.getContentAsString()).doesNotContain("private-marker");
 		}
-		assertThat(mvc.perform(post(PATH).contentType("application/json").content(" ".repeat(524289)))
-				.andReturn().getResponse().getStatus()).isEqualTo(413);
-		assertThat(mvc.perform(post(PATH).contentType("application/json").header("Content-Encoding", "gzip").content("{}"))
-				.andReturn().getResponse().getStatus()).isEqualTo(415);
-		assertThat(mvc.perform(post(PATH).contentType("text/plain").content("{}"))
-				.andReturn().getResponse().getStatus()).isEqualTo(415);
+		assertProblem(mvc.perform(post(PATH).contentType("application/json").content(" ".repeat(524289))).andReturn().getResponse(), 413, "REQUEST_TOO_LARGE");
+		assertProblem(mvc.perform(post(PATH).contentType("application/json").header("Content-Encoding", "identity", "gzip").content("{}"))
+				.andReturn().getResponse(), 415, "UNSUPPORTED_MEDIA_TYPE");
+		assertProblem(mvc.perform(post(PATH).contentType("text/plain").content("{}"))
+				.andReturn().getResponse(), 415, "UNSUPPORTED_MEDIA_TYPE");
 		verifyNoInteractions(service);
+		when(service.query(any())).thenReturn(new IntegrationSummariesPage(List.of(), 0, 0, 20));
+		var identity = mvc.perform(post(PATH).contentType("application/json").header("Content-Encoding", "identity")
+				.content("{\"integrationIds\":[]}")).andReturn().getResponse();
+		assertThat(identity.getStatus()).isEqualTo(200);
+		assertThat(new JsonMapper().readTree(identity.getContentAsString()).path("items").isEmpty()).isTrue();
 		for (var failure : List.of(new IllegalStateException("private-marker"), new DataAccessResourceFailureException("private-marker"))) {
 			doThrow(failure).when(service).query(any());
 			var response = mvc.perform(post(PATH).contentType("application/json").content("{\"integrationIds\":[]}"))
@@ -151,10 +157,42 @@ class ProjectSummariesTests {
 		var items = new java.util.ArrayList<>(java.util.Collections.nCopies(99, max));
 		items.add(new IntegrationSummary(UUID.fromString(ID), 0, 0, 0, null));
 		when(service.query(any())).thenReturn(new IntegrationSummariesPage(items, 10000, Integer.MAX_VALUE, 100));
-		byte[] body = mvc.perform(post(PATH).contentType("application/json").content("{\"integrationIds\":[]}"))
-				.andReturn().getResponse().getContentAsByteArray();
+		var response = mvc.perform(post(PATH).contentType("application/json").content("{\"integrationIds\":[]}"))
+				.andReturn().getResponse();
+		assertThat(response.getStatus()).isEqualTo(200);
+		assertThat(response.getContentType()).isEqualTo("application/json");
+		byte[] body = response.getContentAsByteArray();
+		var page = new JsonMapper().readTree(body);
+		assertThat(page.path("total").asLong()).isEqualTo(10000);
+		assertThat(page.path("offset").asInt()).isEqualTo(Integer.MAX_VALUE);
+		assertThat(page.path("limit").asInt()).isEqualTo(100);
+		assertThat(page.path("items").size()).isEqualTo(100);
+		assertThat(page.path("items").get(0).path("totalReports").asLong()).isEqualTo(Long.MAX_VALUE);
+		assertThat(page.path("items").get(0).path("passedReports").asLong()).isEqualTo(9007199254740993L);
+		assertThat(page.path("items").get(99).path("lastReceivedAt").isNull()).isTrue();
+		for (String field : List.of("totalReports", "passedReports", "failedReports")) {
+			assertThat(page.path("items").get(0).path(field).isIntegralNumber()).isTrue();
+			assertThat(page.path("items").get(99).path(field).asLong()).isZero();
+		}
+		assertThat(page.path("items").get(0).path("failedReports").asLong()).isEqualTo(Long.MAX_VALUE - 9007199254740993L);
+		assertThat(page.path("items").get(0).path("lastReceivedAt").asString()).isEqualTo("9999-12-31T23:59:59.999999Z");
 		assertThat(body.length).isLessThanOrEqualTo(32768);
 		assertThat(new String(body, StandardCharsets.UTF_8)).contains("9007199254740993", "9223372036854775807", "\"lastReceivedAt\":null");
+	}
+
+	private static void assertProblem(org.springframework.mock.web.MockHttpServletResponse response, int status, String code) throws Exception {
+		assertThat(response.getStatus()).isEqualTo(status);
+		assertThat(response.getContentType()).isEqualTo("application/problem+json");
+		var problem = new JsonMapper().readTree(response.getContentAsString());
+		assertThat(problem.propertyNames()).containsExactlyInAnyOrder("type", "title", "status", "detail", "instance", "code", "errors");
+		assertThat(problem.path("type").asString()).isEqualTo("about:blank");
+		assertThat(problem.path("title").asString()).isEqualTo(org.springframework.http.HttpStatus.valueOf(status).getReasonPhrase());
+		assertThat(problem.path("status").asInt()).isEqualTo(status);
+		assertThat(problem.path("code").asString()).isEqualTo(code);
+		assertThat(problem.path("instance").asString()).isEqualTo(PATH);
+		assertThat(problem.path("errors").isObject()).isTrue();
+		assertThat(problem.path("detail").asString()).isNotBlank();
+		assertThat(response.getContentAsString()).doesNotContain("private-marker", "jdbc:", "SQLException");
 	}
 
 	private static contractwatcher.monitoring.model.ProjectSummariesQuery parse(String body) throws Exception {

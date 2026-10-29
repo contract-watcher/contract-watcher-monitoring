@@ -1,6 +1,8 @@
 package contractwatcher.monitoring.service;
 
 import java.util.Comparator;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -44,6 +46,11 @@ public final class ReportIngestionService {
 	public ReportAccepted ingest(ReportRequest request) {
 		validator.validate(request);
 		ReportToStore report = ReportMapper.toStorage(request);
+		if (org.springframework.web.context.request.RequestContextHolder.getRequestAttributes()
+				instanceof org.springframework.web.context.request.ServletRequestAttributes attributes) {
+			attributes.getRequest().setAttribute("monitoring.integrationId", report.integrationId());
+			attributes.getRequest().setAttribute("monitoring.reportId", report.reportId());
+		}
 		return transaction.execute(status -> save(report));
 	}
 

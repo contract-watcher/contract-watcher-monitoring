@@ -14,11 +14,19 @@ import jakarta.servlet.http.HttpServletRequest;
 
 import java.net.URI;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
+import java.sql.SQLTransientConnectionException;
+import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.UUID;
+import org.springframework.dao.QueryTimeoutException;
 import java.util.List;
 import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.http.HttpStatus;
@@ -100,7 +108,9 @@ final class ReportExceptionHandler {
 
 	@ExceptionHandler(Exception.class)
 	ResponseEntity<ProblemDetail> processingFailure(Exception exception, HttpServletRequest request) {
-		if (storageUnavailable(exception)) {
+		StorageFailure failure = storageFailure(exception);
+		request.setAttribute("monitoring.storageFailure", failure);
+		if (failure != StorageFailure.NONE) {
 			return problem(request, HttpStatus.SERVICE_UNAVAILABLE, "STORAGE_UNAVAILABLE",
 					"Хранилище отчетов временно недоступно.", Map.of());
 		}
@@ -128,25 +138,47 @@ final class ReportExceptionHandler {
 		return "Не удалось обработать отчет.";
 	}
 
-	private boolean storageUnavailable(Throwable exception) {
-		for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
-			// A rollback failure can hide the original connection failure.
+	private enum StorageFailure { NONE, UNAVAILABLE, TIMEOUT }
+
+	private StorageFailure storageFailure(Throwable exception) {
+		var pending = new ArrayDeque<Throwable>();
+		var visited = Collections.newSetFromMap(new IdentityHashMap<Throwable, Boolean>());
+		pending.add(exception);
+		StorageFailure result = StorageFailure.NONE;
+		while (!pending.isEmpty()) {
+			Throwable cause = pending.removeFirst();
+			if (!visited.add(cause)) { continue; }
+			if (cause instanceof QueryTimeoutException || cause instanceof SQLTimeoutException
+					|| cause instanceof SQLTransientConnectionException) {
+				return StorageFailure.TIMEOUT;
+			}
+			// Ошибка rollback может скрыть первоначальный сбой хранилища.
 			if (cause instanceof TransactionSystemException transaction
-					&& transaction.getApplicationException() != null
-					&& storageUnavailable(transaction.getApplicationException())) {
-				return true;
+					&& transaction.getApplicationException() != null) {
+				pending.add(transaction.getApplicationException());
 			}
 			if (cause instanceof DataAccessResourceFailureException
 					|| cause instanceof TransientDataAccessResourceException) {
-				return true;
+				result = StorageFailure.UNAVAILABLE;
 			}
 			if (cause instanceof SQLException sql && sql.getSQLState() != null
 					&& (sql.getSQLState().startsWith("08")
 							|| List.of("57P01", "57P02", "57P03").contains(sql.getSQLState()))) {
-				return true;
+				result = StorageFailure.UNAVAILABLE;
 			}
+			if (cause.getCause() != null) { pending.add(cause.getCause()); }
 		}
-		return false;
+		return result;
+	}
+
+	private Object safeId(HttpServletRequest request, String name) {
+		Object variables = request.getAttribute(HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE);
+		Object value = variables instanceof Map<?, ?> paths ? paths.get(name) : null;
+		if (value instanceof String id && id.matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")) {
+			return UUID.fromString(id);
+		}
+		Object validated = request.getAttribute("monitoring." + name);
+		return validated instanceof UUID ? validated : null;
 	}
 
 	private ResponseEntity<ProblemDetail> problem(HttpServletRequest request, HttpStatus status, String code, String detail,
@@ -157,8 +189,14 @@ final class ReportExceptionHandler {
 		problem.setInstance(URI.create(request.getRequestURI()));
 		problem.setProperty("code", code);
 		problem.setProperty("errors", errors);
-		LOG.warn("{} {}: status={}, code={}", request.getMethod(),
-				request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE), status.value(), code);
+		Object pattern = request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);
+		Object failure = request.getAttribute("monitoring.storageFailure");
+		var event = status.is5xxServerError() ? LOG.atError() : status == HttpStatus.NOT_FOUND ? LOG.atInfo() : LOG.atWarn();
+		event.log("{} {}: status={}, code={}, integrationId={}, reportId={}, groupId={}, storage={}, timeout={}, count={}",
+				request.getMethod(), pattern == null ? "unmapped" : pattern, status.value(), code,
+				safeId(request, "integrationId"), safeId(request, "reportId"), safeId(request, "groupId"),
+				failure == null ? "NONE" : failure, failure == StorageFailure.TIMEOUT,
+				request.getAttribute("monitoring.integrationCount"));
 		return ResponseEntity.status(status).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(problem);
 	}
 }

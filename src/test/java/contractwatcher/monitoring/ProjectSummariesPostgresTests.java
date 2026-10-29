@@ -36,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @EnabledIfEnvironmentVariable(named = "MONITORING_TEST_DATABASE_URL", matches = ".+")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@org.junit.jupiter.api.parallel.Execution(org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD)
 class ProjectSummariesPostgresTests {
 	private final HttpClient http = HttpClient.newHttpClient();
 	private final JsonMapper json = new JsonMapper();
@@ -116,10 +117,17 @@ class ProjectSummariesPostgresTests {
 		for (int offset : List.of(0, 2, 4)) {
 			var filtered = page(ids, true, offset, 2, FROM, TO);
 			assertThat(filtered.path("total").asLong()).isEqualTo(3);
-			assertThat(filtered.path("items").size()).isEqualTo(offset == 0 ? 2 : offset == 2 ? 1 : 0);
+			assertThat(filtered.path("items").valueStream().map(item -> item.path("integrationId").asString()).toList())
+					.containsExactlyElementsOf(expected.subList(Math.min(offset, 3), Math.min(offset + 2, 3)).stream().map(UUID::toString).toList());
 		}
 		var subset = page(List.of(ids.get(2), ids.get(4), ids.get(2)), false, 0, 20, FROM, TO);
 		assertThat(subset.path("total").asLong()).isEqualTo(2);
+		assertThat(subset.path("items").valueStream().map(item -> item.path("integrationId").asString()).toList()).containsExactly(ids.get(2).toString(), ids.get(4).toString());
+		var zero = page(List.of(ids.get(0)), false, 0, 20, FROM, TO).path("items").get(0);
+		assertThat(zero.size()).isEqualTo(5);
+		for (String count : List.of("totalReports", "passedReports", "failedReports")) { assertThat(zero.path(count).asLong()).isZero(); }
+		assertThat(zero.path("integrationId").asString()).isEqualTo(ids.get(0).toString());
+		assertThat(zero.path("lastReceivedAt").isNull()).isTrue();
 		assertThat(subset.path("items").get(0).path("passedReports").asLong()).isEqualTo(1);
 		assertThat(page(List.of(ids.get(0)), true, 0, 20, FROM, TO).path("total").asLong()).isZero();
 		assertThat(tableCounts()).isEqualTo(counts);
@@ -175,7 +183,7 @@ class ProjectSummariesPostgresTests {
 			byte[] bytes = (prefix + " ".repeat(size - prefix.length())).getBytes(StandardCharsets.UTF_8);
 			var publisher = HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(bytes));
 			var response = http.send(HttpRequest.newBuilder(base.resolve("/internal/v1/integration-summaries/query"))
-					.header("Content-Type", "application/json").POST(publisher).build(), HttpResponse.BodyHandlers.ofString());
+					.timeout(java.time.Duration.ofSeconds(15)).header("Content-Type", "application/json").POST(publisher).build(), HttpResponse.BodyHandlers.ofString());
 			assertThat(response.statusCode()).isEqualTo(size == 524288 ? 200 : 413);
 		}
 	}
@@ -209,9 +217,10 @@ class ProjectSummariesPostgresTests {
 				var repository = new ProjectSummariesRepository(new JdbcTemplate(new SingleConnectionDataSource(instrumented, true)));
 				var query = new ProjectSummariesQuery(List.of(before, added), FROM, TO, true, offset, 20);
 				var running = pool.submit(() -> repository.query(query));
+				try {
 				long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
 				while (jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE pid = ? AND wait_event = 'advisory'", Integer.class, pid) == 0
-						&& !running.isDone() && System.nanoTime() < deadline) { Thread.onSpinWait(); }
+						&& !running.isDone() && System.nanoTime() < deadline) { Thread.sleep(10); }
 				assertThat(running.isDone()).isFalse();
 				assertThat(jdbc.queryForObject("SELECT wait_event FROM pg_stat_activity WHERE pid = ?", String.class, pid)).isEqualTo("advisory");
 				insert(added, "FAILED", FROM);
@@ -219,8 +228,10 @@ class ProjectSummariesPostgresTests {
 				var result = running.get(10, TimeUnit.SECONDS);
 				assertThat(statements.get()).isEqualTo(1);
 				assertThat(result.total()).isEqualTo(1);
-				assertThat(result.items()).hasSize(offset == 0 ? 1 : 0);
+				assertThat(result.items()).extracting(contractwatcher.monitoring.dto.IntegrationSummary::integrationId)
+						.containsExactlyElementsOf(offset == 0 ? List.of(before) : List.of());
 				assertThat(page(List.of(before, added), true, offset, 20, FROM, TO).path("total").asLong()).isEqualTo(2);
+				} finally { writerJdbc.execute("SELECT pg_advisory_unlock(181818)"); }
 			}
 		}
 	}
@@ -234,6 +245,7 @@ class ProjectSummariesPostgresTests {
 				.replace("2026-10-19T09:00:00.123456Z", FROM.toString());
 		assertThat(postReport(request).statusCode()).isEqualTo(201);
 		var before = tableCounts();
+		var groupsBefore = jdbc.queryForList("SELECT * FROM monitoring.violation_groups WHERE integration_id = ? ORDER BY group_id", id);
 		String duplicate = request.replace(FROM.toString(), TO.toString());
 		try (var workers = Executors.newFixedThreadPool(3)) {
 			var tasks = java.util.stream.IntStream.range(0, 3).mapToObj(n -> workers.submit(() -> postReport(duplicate))).toList();
@@ -244,6 +256,7 @@ class ProjectSummariesPostgresTests {
 			}
 		}
 		assertThat(tableCounts()).isEqualTo(before);
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.violation_groups WHERE integration_id = ? ORDER BY group_id", id)).isEqualTo(groupsBefore);
 		var item = page(List.of(id), true, 0, 20, FROM, TO).path("items").get(0);
 		assertThat(item.path("failedReports").asLong()).isEqualTo(1);
 		assertThat(Instant.parse(item.path("lastReceivedAt").asString())).isEqualTo(FROM);
@@ -265,9 +278,10 @@ class ProjectSummariesPostgresTests {
 	}
 
 	@Test
-	void retryAfterHttpTimeoutDoesNotWriteOrAccumulateCounters() throws Exception {
+	void clientHttpTimeoutAllowsSafeReadRetryAfterServerFinishes() throws Exception {
 		UUID id = UUID.randomUUID();
 		insert(id, "FAILED", FROM);
+		var groupsBefore = jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id");
 		var before = tableCounts();
 		try (var blocker = open(url)) {
 			blocker.setAutoCommit(false);
@@ -287,7 +301,7 @@ class ProjectSummariesPostgresTests {
 							AND wait_event_type = 'Lock' AND query LIKE 'WITH requested AS MATERIALIZED%')
 							""", Boolean.class));
 					if (blocked) { break; }
-					Thread.onSpinWait();
+					Thread.sleep(10);
 				}
 				assertThat(blocked).isTrue();
 				org.assertj.core.api.Assertions.assertThatThrownBy(() -> running.get(5, TimeUnit.SECONDS))
@@ -296,6 +310,11 @@ class ProjectSummariesPostgresTests {
 				blocker.rollback();
 			}
 		}
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname = current_database() AND state = 'active' AND query LIKE 'WITH requested AS MATERIALIZED%')", Boolean.class))
+				&& System.nanoTime() < deadline) { Thread.sleep(10); }
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'active' AND query LIKE 'WITH requested AS MATERIALIZED%'", Integer.class)).isZero();
+		assertThat(jdbc.queryForList("SELECT * FROM monitoring.violation_groups ORDER BY group_id")).isEqualTo(groupsBefore);
 		for (int repeat = 0; repeat < 2; repeat++) {
 			assertThat(page(List.of(id), false, 0, 20, null, null).path("items").get(0).path("failedReports").asLong()).isEqualTo(1);
 		}
@@ -319,7 +338,7 @@ class ProjectSummariesPostgresTests {
 		String body = "{\"integrationIds\":" + json.writeValueAsString(ids) + ",\"onlyFailed\":" + failed
 				+ ",\"offset\":" + offset + ",\"limit\":" + limit + (period.isEmpty() ? "" : "," + period) + "}";
 		var response = http.send(HttpRequest.newBuilder(base.resolve("/internal/v1/integration-summaries/query"))
-				.header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+				.timeout(java.time.Duration.ofSeconds(15)).header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
 		assertThat(response.statusCode()).isEqualTo(200);
 		return json.readTree(response.body());
 	}
@@ -330,13 +349,13 @@ class ProjectSummariesPostgresTests {
 	}
 
 	private JsonNode get(String path) throws Exception {
-		var response = http.send(HttpRequest.newBuilder(base.resolve(path)).GET().build(), HttpResponse.BodyHandlers.ofString());
+		var response = http.send(HttpRequest.newBuilder(base.resolve(path)).timeout(java.time.Duration.ofSeconds(15)).GET().build(), HttpResponse.BodyHandlers.ofString());
 		assertThat(response.statusCode()).isEqualTo(200);
 		return json.readTree(response.body());
 	}
 
 	private HttpResponse<String> postReport(String body) throws Exception {
-		return http.send(HttpRequest.newBuilder(base.resolve("/internal/v1/reports")).header("Content-Type", "application/json")
+		return http.send(HttpRequest.newBuilder(base.resolve("/internal/v1/reports")).timeout(java.time.Duration.ofSeconds(15)).header("Content-Type", "application/json")
 				.POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
 	}
 
