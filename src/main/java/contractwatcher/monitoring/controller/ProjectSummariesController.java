@@ -54,6 +54,8 @@ final class ProjectSummariesController {
 				throw new HttpMediaTypeNotSupportedException("Требуется несжатый JSON.", List.of(MediaType.APPLICATION_JSON));
 			}
 		}
-		return service.query(ProjectSummariesParameters.parse(request.getInputStream(), request.getQueryString()));
+		var query = ProjectSummariesParameters.parse(request.getInputStream(), request.getQueryString());
+		request.setAttribute("monitoring.integrationCount", query.integrationIds().size());
+		return service.query(query);
 	}
 }

@@ -65,6 +65,21 @@ class ReportHistoryParametersTests {
 		assertInvalid(parameters);
 	}
 
+	@ParameterizedTest
+	@ValueSource(strings = {"limit=0", "limit=101", "limit=+1", "limit= 1", "limit=2147483648", "offset=-1", "offset=2147483648", "offset=1&offset=2", "status=Passed&status=Failed"})
+	void rejectsInvalidPaginationAndRepeatedScalars(String query) {
+		var parameters = new LinkedMultiValueMap<String, String>();
+		for (String pair : query.split("&")) { String[] parts = pair.split("=", 2); parameters.add(parts[0], parts[1]); }
+		assertThatThrownBy(() -> ReportHistoryParameters.parse(INTEGRATION, parameters)).isInstanceOf(ReportHistoryRequestException.class);
+	}
+
+	@Test
+	void acceptsMaximumAndLeadingZeroPagination() {
+		var parameters = new LinkedMultiValueMap<String, String>(); parameters.add("limit", "0100"); parameters.add("offset", "2147483647");
+		var query = ReportHistoryParameters.parse(INTEGRATION, parameters);
+		assertThat(query.limit()).isEqualTo(100); assertThat(query.offset()).isEqualTo(Integer.MAX_VALUE);
+	}
+
 	private static void assertInvalid(LinkedMultiValueMap<String, String> parameters) {
 		assertThatThrownBy(() -> ReportHistoryParameters.parse(INTEGRATION, parameters))
 				.isInstanceOfSatisfying(ReportHistoryRequestException.class,

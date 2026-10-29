@@ -91,9 +91,12 @@ class OpenApiConfiguration {
 
 	private static Schema<?> problemSchema() {
 		// code и errors являются расширениями ProblemDetail и не выводятся из его Java-типа.
-		return new ObjectSchema().additionalProperties(false)
-				.required(List.of("type", "title", "status", "detail", "instance", "code", "errors"))
-				.addProperty("type", new StringSchema().format("uri")._enum(List.of("about:blank")))
+		var problem = new ObjectSchema();
+		problem.setRequired(List.of("type", "title", "status", "detail", "instance", "code", "errors"));
+		var type = new StringSchema();
+		type.setFormat("uri");
+		type.setEnum(List.of("about:blank"));
+		return problem.additionalProperties(false).addProperty("type", type)
 				.addProperty("title", new StringSchema())
 				.addProperty("status", new IntegerSchema().format("int32"))
 				.addProperty("detail", new StringSchema())
